@@ -1,0 +1,628 @@
+"""CRM para intermediario de suplidores de productos agrícolas.
+
+Ejecutar con:  streamlit run app.py
+"""
+
+from datetime import date, datetime, timedelta
+
+import pandas as pd
+import streamlit as st
+
+import database as db
+
+# --------------------------------------------------------------------------
+# Configuración general
+# --------------------------------------------------------------------------
+
+st.set_page_config(
+    page_title="CRM Suplidores Agrícolas",
+    page_icon="🌾",
+    layout="wide",
+)
+
+VERDE = "#2E7D32"   # hue única para los gráficos de cartera
+TEAL = "#00695C"    # hue única para los gráficos de producto
+
+st.markdown(
+    """
+    <style>
+      .stButton > button {
+          width: 100%;
+          padding: 0.6rem 1rem;
+          font-size: 1rem;
+          font-weight: 600;
+          border-radius: 8px;
+      }
+      .stDownloadButton > button,
+      .stFormSubmitButton > button {
+          width: 100%;
+          padding: 0.6rem 1rem;
+          font-size: 1rem;
+          font-weight: 600;
+          border-radius: 8px;
+      }
+      div[data-testid="stMetric"] {
+          background: #F7F9F7;
+          border: 1px solid #E3E8E3;
+          border-radius: 10px;
+          padding: 14px 16px;
+      }
+      h1, h2, h3 { color: #1B3A22; }
+      section[data-testid="stSidebar"] { background: #F4F7F4; }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
+
+@st.cache_resource
+def conexion():
+    conn = db.get_conn()
+    db.init_db(conn)
+    return conn
+
+
+conn = conexion()
+
+DASHBOARD = "📊 Dashboard"
+FORMULARIO = "➕ Agregar / Editar Cliente"
+LISTA = "📋 Lista de Clientes"
+CONTACTOS = "🗒️ Historial de Contactos"
+SEGUIMIENTO = "🔔 Seguimiento"
+
+PAGINAS = [DASHBOARD, FORMULARIO, LISTA, CONTACTOS, SEGUIMIENTO]
+
+
+def ir_a(pagina, cliente_id=None):
+    """Pide un cambio de sección (y opcionalmente fija el cliente en foco).
+
+    No se puede escribir en st.session_state['nav'] aquí porque el radio del
+    menú ya fue creado en esta pasada; se deja el destino apuntado y se aplica
+    al principio de la siguiente.
+    """
+    st.session_state["_destino"] = pagina
+    if cliente_id is not None:
+        st.session_state["cliente_foco"] = cliente_id
+    st.rerun()
+
+
+def avisar(mensaje, tipo="success"):
+    """Guarda un mensaje para mostrarlo después del st.rerun().
+
+    Escribirlo directamente antes de recargar no sirve: la recarga descarta
+    todo lo pintado en esta pasada.
+    """
+    st.session_state["_aviso"] = (tipo, mensaje)
+
+
+def mostrar_aviso():
+    if "_aviso" in st.session_state:
+        tipo, mensaje = st.session_state.pop("_aviso")
+        getattr(st, tipo)(mensaje)
+
+
+# --------------------------------------------------------------------------
+# Utilidades de presentación
+# --------------------------------------------------------------------------
+
+COLUMNAS_TABLA = {
+    "nombre": "Nombre",
+    "empresa": "Empresa",
+    "telefono": "Teléfono",
+    "email": "Email",
+    "ubicacion": "Ubicación",
+    "giro_negocio": "Giro de negocio",
+    "productos_interes": "Productos de interés",
+    "estado": "Estado",
+    "ultimo_contacto": "Último contacto",
+    "total_contactos": "Contactos",
+    "proximo_seguimiento": "Próximo seguimiento",
+    "fecha_creacion": "Alta",
+}
+
+
+def tabla_clientes(filas, columnas=None):
+    """DataFrame con encabezados en español, listo para mostrar o exportar."""
+    cols = columnas or COLUMNAS_TABLA
+    if not filas:
+        return pd.DataFrame(columns=list(cols.values()))
+    df = pd.DataFrame(filas)
+    df = df[[c for c in cols if c in df.columns]]
+    return df.rename(columns=cols)
+
+
+def a_csv(df):
+    """utf-8-sig para que Excel en Windows muestre bien los acentos."""
+    return df.to_csv(index=False).encode("utf-8-sig")
+
+
+def etiqueta_cliente(c):
+    empresa = f" — {c['empresa']}" if c.get("empresa") else ""
+    return f"{c['nombre']}{empresa}"
+
+
+def dias_desde(fecha_iso):
+    """Días transcurridos desde la fecha (negativo si aún no llega)."""
+    if not fecha_iso:
+        return None
+    return (date.today() - datetime.strptime(fecha_iso, "%Y-%m-%d").date()).days
+
+
+def a_fecha(fecha_iso):
+    return datetime.strptime(fecha_iso, "%Y-%m-%d").date() if fecha_iso else None
+
+
+def selector_cliente(label, clientes):
+    """Selectbox de clientes que devuelve el id.
+
+    Sin `key`: así el índice calculado desde `cliente_foco` manda, y la
+    navegación desde otra sección abre el cliente correcto.
+    """
+    ids = [c["id"] for c in clientes]
+    por_id = {c["id"]: c for c in clientes}
+    foco = st.session_state.get("cliente_foco")
+    indice = ids.index(foco) if foco in ids else 0
+
+    cid = st.selectbox(label, ids, index=indice, format_func=lambda i: etiqueta_cliente(por_id[i]))
+    st.session_state["cliente_foco"] = cid
+    return cid
+
+
+# --------------------------------------------------------------------------
+# 1. Dashboard
+# --------------------------------------------------------------------------
+
+def pagina_dashboard():
+    st.title(DASHBOARD)
+    st.caption("Resumen de la cartera de clientes y de la actividad comercial.")
+
+    m = db.metricas(conn)
+    if m["total"] == 0:
+        st.info(f"Todavía no hay clientes registrados. Empieza en **{FORMULARIO}**.")
+        return
+
+    sin_contactar = db.clientes_sin_contactar(conn)
+    vencidos, para_hoy, _ = db.seguimientos(conn)
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Total de clientes", m["total"])
+    c2.metric("Clientes activos", m["activos"])
+    c3.metric(
+        "Tasa de conversión",
+        f"{m['tasa_conversion']:.1f}%",
+        help="Clientes activos sobre el total de la cartera.",
+    )
+    c4.metric("Contactos (últimos 30 días)", m["contactos_mes"])
+
+    c5, c6, c7 = st.columns(3)
+    c5.metric(f"Sin contactar hace {db.DIAS_SIN_CONTACTO}+ días", len(sin_contactar))
+    c6.metric("Seguimientos vencidos", len(vencidos))
+    c7.metric("Seguimientos para hoy", len(para_hoy))
+
+    st.divider()
+    izq, der = st.columns(2)
+
+    with izq:
+        st.subheader("Clientes por estado")
+        df_estado = pd.DataFrame(
+            {"Estado": list(m["por_estado"]), "Clientes": list(m["por_estado"].values())}
+        ).set_index("Estado")
+        st.bar_chart(df_estado, color=VERDE, horizontal=True, height=260)
+        with st.expander("Ver como tabla"):
+            st.dataframe(df_estado, width="stretch")
+
+    with der:
+        st.subheader("Interés por producto")
+        df_prod = pd.DataFrame(
+            {"Producto": list(m["por_producto"]), "Clientes": list(m["por_producto"].values())}
+        ).set_index("Producto")
+        st.bar_chart(df_prod, color=TEAL, horizontal=True, height=260)
+        with st.expander("Ver como tabla"):
+            st.dataframe(df_prod, width="stretch")
+
+    st.divider()
+    st.subheader(f"⏰ Clientes sin contactar hace {db.DIAS_SIN_CONTACTO} días o más")
+
+    if not sin_contactar:
+        st.success("Toda la cartera ha sido contactada recientemente.")
+        return
+
+    filas = [
+        {
+            "Nombre": c["nombre"],
+            "Empresa": c["empresa"],
+            "Teléfono": c["telefono"],
+            "Estado": c["estado"],
+            "Último contacto": c["ultimo_contacto"] or "Nunca contactado",
+            "Días sin contacto": dias_desde(c["ultimo_contacto"] or c["fecha_creacion"]),
+        }
+        for c in sin_contactar
+    ]
+    st.dataframe(
+        pd.DataFrame(filas).sort_values("Días sin contacto", ascending=False),
+        width="stretch",
+        hide_index=True,
+    )
+
+
+# --------------------------------------------------------------------------
+# 2. Agregar / Editar cliente
+# --------------------------------------------------------------------------
+
+def pagina_formulario():
+    st.title(FORMULARIO)
+    mostrar_aviso()
+
+    clientes = db.listar_clientes(conn)
+    opciones = [0] + [c["id"] for c in clientes]
+    por_id = {c["id"]: c for c in clientes}
+
+    foco = st.session_state.get("cliente_foco") or 0
+    indice = opciones.index(foco) if foco in opciones else 0
+
+    cid = st.selectbox(
+        "¿Qué quieres hacer?",
+        opciones,
+        index=indice,
+        format_func=lambda i: (
+            "🆕 Registrar un cliente nuevo" if i == 0 else f"✏️ Editar: {etiqueta_cliente(por_id[i])}"
+        ),
+    )
+    st.session_state["cliente_foco"] = cid or None
+
+    editando = cid != 0
+    actual = por_id.get(cid, {})
+    productos_actuales = (actual.get("productos_interes") or "").split(", ")
+
+    st.divider()
+
+    # Las claves llevan el id del cliente para que el formulario se reinicie
+    # al cambiar de cliente en vez de arrastrar los valores del anterior. El
+    # formulario de alta lleva además un contador, que se incrementa tras cada
+    # registro para devolverlo en blanco.
+    k = f"_{cid}" if editando else f"_nuevo_{st.session_state.get('alta_gen', 0)}"
+
+    with st.form("form_cliente"):
+        col1, col2 = st.columns(2)
+        with col1:
+            nombre = st.text_input("Nombre de contacto *", value=actual.get("nombre", ""), key="nombre" + k)
+            telefono = st.text_input("Teléfono", value=actual.get("telefono") or "", key="tel" + k)
+            ubicacion = st.text_input(
+                "Ubicación",
+                value=actual.get("ubicacion") or "",
+                placeholder="Provincia / municipio",
+                key="ubi" + k,
+            )
+        with col2:
+            empresa = st.text_input("Empresa", value=actual.get("empresa") or "", key="emp" + k)
+            email = st.text_input("Email", value=actual.get("email") or "", key="mail" + k)
+            giro = st.text_input(
+                "Giro de negocio",
+                value=actual.get("giro_negocio") or "",
+                placeholder="Colmado, finca, distribuidor, agroveterinaria…",
+                key="giro" + k,
+            )
+
+        st.markdown("**Productos de interés**")
+        cols = st.columns(len(db.PRODUCTOS))
+        seleccion = [
+            producto
+            for col, producto in zip(cols, db.PRODUCTOS)
+            if col.checkbox(producto, value=producto in productos_actuales, key=f"prod_{producto}{k}")
+        ]
+
+        st.markdown("")
+        col3, col4 = st.columns(2)
+        estado = col3.selectbox(
+            "Estado",
+            db.ESTADOS,
+            index=db.ESTADOS.index(actual.get("estado", "Prospecto")),
+            key="estado" + k,
+        )
+        seguimiento = col4.date_input(
+            "Próximo seguimiento",
+            value=a_fecha(actual.get("proximo_seguimiento")) if editando else date.today() + timedelta(days=7),
+            format="DD/MM/YYYY",
+            key="seg" + k,
+        )
+        sin_seguimiento = st.checkbox(
+            "Sin próximo seguimiento programado",
+            value=editando and not actual.get("proximo_seguimiento"),
+            key="nofollow" + k,
+        )
+
+        guardar = st.form_submit_button(
+            "💾 Guardar cambios" if editando else "💾 Guardar cliente", type="primary"
+        )
+
+    if guardar:
+        if not nombre.strip():
+            st.error("El nombre de contacto es obligatorio.")
+        else:
+            datos = {
+                "nombre": nombre.strip(),
+                "empresa": empresa.strip(),
+                "telefono": telefono.strip(),
+                "email": email.strip(),
+                "ubicacion": ubicacion.strip(),
+                "giro_negocio": giro.strip(),
+                "productos_interes": ", ".join(seleccion),
+                "estado": estado,
+                "proximo_seguimiento": None if sin_seguimiento or not seguimiento else seguimiento.isoformat(),
+            }
+
+            if editando:
+                db.actualizar_cliente(conn, cid, datos)
+                avisar(f"Cliente **{datos['nombre']}** actualizado.")
+            else:
+                nuevo_id = db.crear_cliente(conn, datos)
+                # Vaciar el formulario de alta para que no reaparezca relleno.
+                st.session_state["alta_gen"] = st.session_state.get("alta_gen", 0) + 1
+                st.session_state["cliente_foco"] = nuevo_id
+                avisar(f"Cliente **{datos['nombre']}** registrado.")
+            st.rerun()
+
+    if not editando:
+        return
+
+    st.divider()
+    st.subheader("Eliminar cliente")
+    st.caption("Eliminar un cliente borra también todo su historial de contactos.")
+    col5, col6 = st.columns([1, 2])
+    confirmar = col6.checkbox("Confirmo que quiero eliminar este cliente", key="conf_del" + k)
+    if col5.button("🗑️ Eliminar cliente", disabled=not confirmar):
+        db.eliminar_cliente(conn, cid)
+        st.session_state["cliente_foco"] = None
+        avisar(f"Cliente **{actual['nombre']}** eliminado.", "warning")
+        st.rerun()
+
+
+# --------------------------------------------------------------------------
+# 3. Lista de clientes
+# --------------------------------------------------------------------------
+
+def pagina_lista():
+    st.title(LISTA)
+
+    col1, col2 = st.columns([3, 2])
+    busqueda = col1.text_input("🔍 Buscar", placeholder="Nombre, empresa, ubicación o giro de negocio…")
+    estado = col2.selectbox("Filtrar por estado", ["Todos"] + db.ESTADOS)
+
+    total = db.contar_clientes(conn)
+    if total == 0:
+        st.info(f"Todavía no hay clientes registrados. Empieza en **{FORMULARIO}**.")
+        return
+
+    clientes = db.listar_clientes(conn, busqueda, estado)
+    st.caption(f"Mostrando **{len(clientes)}** de **{total}** clientes.")
+
+    df = tabla_clientes(clientes)
+    if df.empty:
+        st.warning("Ningún cliente coincide con la búsqueda.")
+    else:
+        st.dataframe(df, width="stretch", hide_index=True)
+
+    col3, col4 = st.columns(2)
+    col3.download_button(
+        "⬇️ Exportar resultados a CSV",
+        data=a_csv(df),
+        file_name=f"clientes_{date.today().isoformat()}.csv",
+        mime="text/csv",
+        disabled=df.empty,
+    )
+    col4.download_button(
+        "⬇️ Exportar TODOS los clientes a CSV",
+        data=a_csv(tabla_clientes(db.listar_clientes(conn))),
+        file_name=f"clientes_completo_{date.today().isoformat()}.csv",
+        mime="text/csv",
+    )
+
+    if not clientes:
+        return
+
+    st.divider()
+    st.subheader("Acciones rápidas")
+    cid = selector_cliente("Cliente", clientes)
+    col5, col6 = st.columns(2)
+    if col5.button("✏️ Editar este cliente"):
+        ir_a(FORMULARIO, cid)
+    if col6.button("🗒️ Registrar un contacto"):
+        ir_a(CONTACTOS, cid)
+
+
+# --------------------------------------------------------------------------
+# 4. Historial de contactos
+# --------------------------------------------------------------------------
+
+def pagina_contactos():
+    st.title(CONTACTOS)
+    mostrar_aviso()
+
+    clientes = db.listar_clientes(conn)
+    if not clientes:
+        st.info("Registra primero un cliente para poder anotar contactos.")
+        return
+
+    cid = selector_cliente("Cliente", clientes)
+    cliente = db.obtener_cliente(conn, cid)
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Estado", cliente["estado"])
+    col2.metric("Teléfono", cliente["telefono"] or "—")
+    col3.metric("Próximo seguimiento", cliente["proximo_seguimiento"] or "Sin programar")
+
+    st.divider()
+    st.subheader("Registrar nuevo contacto")
+
+    with st.form("form_contacto", clear_on_submit=True):
+        col4, col5, col6 = st.columns(3)
+        # La fecha se registra automáticamente con el día de hoy; se puede ajustar.
+        fecha = col4.date_input("Fecha del contacto", value=date.today(), format="DD/MM/YYYY")
+        tipo = col5.selectbox("Tipo de contacto", db.TIPOS_CONTACTO)
+        resultado = col6.selectbox("Resultado", db.RESULTADOS)
+
+        notas = st.text_area("Notas", placeholder="Qué se habló, cantidades, precios, compromisos…")
+
+        col7, col8 = st.columns(2)
+        programar = col7.checkbox("Programar próximo seguimiento", value=True)
+        proximo = col8.date_input(
+            "Fecha del próximo seguimiento",
+            value=date.today() + timedelta(days=7),
+            format="DD/MM/YYYY",
+        )
+
+        guardar = st.form_submit_button("💾 Guardar contacto", type="primary")
+
+    if guardar:
+        db.agregar_contacto(conn, cid, fecha, tipo, notas.strip(), resultado)
+        if programar:
+            db.fijar_proximo_seguimiento(conn, cid, proximo)
+            avisar(f"Contacto registrado. Próximo seguimiento: {proximo.strftime('%d/%m/%Y')}.")
+        else:
+            avisar("Contacto registrado.")
+        st.rerun()
+
+    st.divider()
+    st.subheader("Historial")
+
+    contactos = db.listar_contactos(conn, cid)
+    if not contactos:
+        st.info("Este cliente aún no tiene contactos registrados.")
+        return
+
+    for c in contactos:
+        dias = dias_desde(c["fecha"])
+        antiguedad = "hoy" if dias == 0 else f"hace {dias} día{'s' if dias != 1 else ''}"
+        with st.expander(f"**{c['fecha']}** · {c['tipo_contacto']} · {c['resultado']}  —  {antiguedad}"):
+            st.write(c["notas"] or "_Sin notas._")
+            if st.button("🗑️ Eliminar este contacto", key=f"del_contacto_{c['id']}"):
+                db.eliminar_contacto(conn, c["id"])
+                st.rerun()
+
+    df_contactos = pd.DataFrame(contactos)[["fecha", "tipo_contacto", "resultado", "notas"]].rename(
+        columns={
+            "fecha": "Fecha",
+            "tipo_contacto": "Tipo de contacto",
+            "resultado": "Resultado",
+            "notas": "Notas",
+        }
+    )
+    st.download_button(
+        "⬇️ Exportar historial a CSV",
+        data=a_csv(df_contactos),
+        file_name=f"contactos_{cliente['nombre'].replace(' ', '_')}.csv",
+        mime="text/csv",
+    )
+
+
+# --------------------------------------------------------------------------
+# 5. Seguimiento
+# --------------------------------------------------------------------------
+
+def bloque_seguimiento(titulo, filas, mensaje_vacio):
+    st.subheader(titulo)
+    if not filas:
+        st.caption(mensaje_vacio)
+        return
+
+    for c in filas:
+        dias = dias_desde(c["proximo_seguimiento"])
+        if dias > 0:
+            aviso = f"⚠️ Vencido hace {dias} día{'s' if dias != 1 else ''}"
+        elif dias == 0:
+            aviso = "📌 Es para hoy"
+        else:
+            aviso = f"🗓️ En {abs(dias)} día{'s' if dias != -1 else ''}"
+
+        with st.container(border=True):
+            col1, col2, col3 = st.columns([3, 2, 2])
+            col1.markdown(
+                f"**{etiqueta_cliente(c)}**  \n{c['estado']} · {c['ubicacion'] or 'Sin ubicación'}"
+            )
+            col2.markdown(
+                f"📞 {c['telefono'] or '—'}  \nÚltimo contacto: {c['ultimo_contacto'] or 'Nunca'}"
+            )
+            col3.markdown(f"{aviso}  \nProgramado: {c['proximo_seguimiento']}")
+
+            col4, col5 = st.columns(2)
+            if col4.button("🗒️ Registrar contacto", key=f"seg_contacto_{c['id']}"):
+                ir_a(CONTACTOS, c["id"])
+            if col5.button("⏭️ Posponer 7 días", key=f"seg_posponer_{c['id']}"):
+                nueva = a_fecha(c["proximo_seguimiento"]) + timedelta(days=7)
+                db.fijar_proximo_seguimiento(conn, c["id"], nueva)
+                avisar(f"{c['nombre']}: seguimiento movido al {nueva.strftime('%d/%m/%Y')}.", "info")
+                st.rerun()
+
+
+def pagina_seguimiento():
+    st.title("🔔 Sistema de Seguimiento")
+    st.caption("Clientes con seguimiento vencido, programado para hoy o próximo a vencer.")
+    mostrar_aviso()
+
+    dias = st.slider("Mirar hacia adelante (días)", 1, 30, 7)
+    vencidos, para_hoy, proximos = db.seguimientos(conn, dias)
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Vencidos", len(vencidos))
+    col2.metric("Para hoy", len(para_hoy))
+    col3.metric(f"Próximos {dias} días", len(proximos))
+
+    st.divider()
+    bloque_seguimiento("🔴 Seguimientos vencidos", vencidos, "Sin seguimientos vencidos. 👍")
+    st.divider()
+    bloque_seguimiento("🟡 Para hoy", para_hoy, "Nada programado para hoy.")
+    st.divider()
+    bloque_seguimiento(f"🟢 Próximos {dias} días", proximos, "Nada programado en ese rango.")
+
+    st.divider()
+    st.subheader("Clientes sin seguimiento programado")
+    sin_programar = [c for c in db.listar_clientes(conn) if not c["proximo_seguimiento"]]
+    if not sin_programar:
+        st.caption("Todos los clientes tienen una fecha de seguimiento.")
+    else:
+        st.dataframe(
+            tabla_clientes(
+                sin_programar,
+                {
+                    "nombre": "Nombre",
+                    "empresa": "Empresa",
+                    "telefono": "Teléfono",
+                    "estado": "Estado",
+                    "ultimo_contacto": "Último contacto",
+                },
+            ),
+            width="stretch",
+            hide_index=True,
+        )
+
+
+# --------------------------------------------------------------------------
+# Navegación
+# --------------------------------------------------------------------------
+
+# Debe aplicarse antes de crear el radio del menú.
+if "_destino" in st.session_state:
+    st.session_state["nav"] = st.session_state.pop("_destino")
+
+with st.sidebar:
+    st.title("🌾 CRM Suplidores")
+    st.caption("Productos agrícolas · arroz, maíz, abono")
+    st.divider()
+    pagina = st.radio("Secciones", PAGINAS, key="nav", label_visibility="collapsed")
+    st.divider()
+
+    _vencidos, _hoy, _ = db.seguimientos(conn)
+    pendientes = len(_vencidos) + len(_hoy)
+    if pendientes:
+        st.warning(f"**{pendientes}** seguimiento(s) vencido(s) o para hoy.")
+    st.caption(f"Base de datos: `{db.DB_PATH.name}`")
+
+VISTAS = {
+    DASHBOARD: pagina_dashboard,
+    FORMULARIO: pagina_formulario,
+    LISTA: pagina_lista,
+    CONTACTOS: pagina_contactos,
+    SEGUIMIENTO: pagina_seguimiento,
+}
+
+VISTAS[pagina]()
