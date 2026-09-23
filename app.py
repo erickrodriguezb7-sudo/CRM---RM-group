@@ -21,8 +21,11 @@ st.set_page_config(
 )
 
 VERDE = "#2E7D32"   # hue única para los gráficos de cartera
-TEAL = "#00695C"    # hue única para los gráficos de producto
+TEAL = "#00897B"    # hue única para el gráfico por tipo
 
+# Sin colores fijos de texto ni de fondo: Streamlit sigue el modo claro/oscuro
+# del navegador, y un color fijo (p. ej. títulos verde oscuro) desaparece en
+# modo oscuro. Los fondos semitransparentes funcionan sobre ambos temas.
 st.markdown(
     """
     <style>
@@ -42,13 +45,11 @@ st.markdown(
           border-radius: 8px;
       }
       div[data-testid="stMetric"] {
-          background: #F7F9F7;
-          border: 1px solid #E3E8E3;
+          background: rgba(46, 125, 50, 0.08);
+          border: 1px solid rgba(128, 128, 128, 0.3);
           border-radius: 10px;
           padding: 14px 16px;
       }
-      h1, h2, h3 { color: #1B3A22; }
-      section[data-testid="stSidebar"] { background: #F4F7F4; }
     </style>
     """,
     unsafe_allow_html=True,
@@ -65,8 +66,8 @@ def conexion():
 conn = conexion()
 
 DASHBOARD = "📊 Dashboard"
-FORMULARIO = "➕ Agregar / Editar Cliente"
-LISTA = "📋 Lista de Clientes"
+FORMULARIO = "➕ Agregar / Editar Suplidor o Cliente"
+LISTA = "📋 Lista de Suplidores y Clientes"
 CONTACTOS = "🗒️ Historial de Contactos"
 SEGUIMIENTO = "🔔 Seguimiento"
 
@@ -107,11 +108,11 @@ def mostrar_aviso():
 
 COLUMNAS_TABLA = {
     "nombre": "Nombre",
+    "tipo": "Tipo",
     "empresa": "Empresa",
     "telefono": "Teléfono",
     "email": "Email",
     "ubicacion": "Ubicación",
-    "giro_negocio": "Giro de negocio",
     "productos_interes": "Productos de interés",
     "estado": "Estado",
     "ultimo_contacto": "Último contacto",
@@ -174,18 +175,18 @@ def selector_cliente(label, clientes):
 
 def pagina_dashboard():
     st.title(DASHBOARD)
-    st.caption("Resumen de la cartera de clientes y de la actividad comercial.")
+    st.caption("Resumen de la cartera de suplidores y clientes y de la actividad comercial.")
 
     m = db.metricas(conn)
     if m["total"] == 0:
-        st.info(f"Todavía no hay clientes registrados. Empieza en **{FORMULARIO}**.")
+        st.info(f"Todavía no hay suplidores ni clientes registrados. Empieza en **{FORMULARIO}**.")
         return
 
     sin_contactar = db.clientes_sin_contactar(conn)
     vencidos, para_hoy, _ = db.seguimientos(conn)
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total de clientes", m["total"])
+    c1.metric("Total registrados", m["total"])
     c2.metric("Clientes activos", m["activos"])
     c3.metric(
         "Tasa de conversión",
@@ -203,22 +204,22 @@ def pagina_dashboard():
     izq, der = st.columns(2)
 
     with izq:
-        st.subheader("Clientes por estado")
+        st.subheader("Registros por estado")
         df_estado = pd.DataFrame(
-            {"Estado": list(m["por_estado"]), "Clientes": list(m["por_estado"].values())}
+            {"Estado": list(m["por_estado"]), "Registros": list(m["por_estado"].values())}
         ).set_index("Estado")
         st.bar_chart(df_estado, color=VERDE, horizontal=True, height=260)
         with st.expander("Ver como tabla"):
             st.dataframe(df_estado, width="stretch")
 
     with der:
-        st.subheader("Interés por producto")
-        df_prod = pd.DataFrame(
-            {"Producto": list(m["por_producto"]), "Clientes": list(m["por_producto"].values())}
-        ).set_index("Producto")
-        st.bar_chart(df_prod, color=TEAL, horizontal=True, height=260)
+        st.subheader("Suplidores y clientes")
+        df_tipo = pd.DataFrame(
+            {"Tipo": list(m["por_tipo"]), "Registros": list(m["por_tipo"].values())}
+        ).set_index("Tipo")
+        st.bar_chart(df_tipo, color=TEAL, horizontal=True, height=260)
         with st.expander("Ver como tabla"):
-            st.dataframe(df_prod, width="stretch")
+            st.dataframe(df_tipo, width="stretch")
 
     st.divider()
     st.subheader(f"⏰ Clientes sin contactar hace {db.DIAS_SIN_CONTACTO} días o más")
@@ -230,6 +231,7 @@ def pagina_dashboard():
     filas = [
         {
             "Nombre": c["nombre"],
+            "Tipo": c["tipo"],
             "Empresa": c["empresa"],
             "Teléfono": c["telefono"],
             "Estado": c["estado"],
@@ -246,7 +248,7 @@ def pagina_dashboard():
 
 
 # --------------------------------------------------------------------------
-# 2. Agregar / Editar cliente
+# 2. Agregar / Editar suplidor o cliente
 # --------------------------------------------------------------------------
 
 def pagina_formulario():
@@ -265,14 +267,15 @@ def pagina_formulario():
         opciones,
         index=indice,
         format_func=lambda i: (
-            "🆕 Registrar un cliente nuevo" if i == 0 else f"✏️ Editar: {etiqueta_cliente(por_id[i])}"
+            "🆕 Registrar un suplidor o cliente nuevo"
+            if i == 0
+            else f"✏️ Editar: {etiqueta_cliente(por_id[i])}"
         ),
     )
     st.session_state["cliente_foco"] = cid or None
 
     editando = cid != 0
     actual = por_id.get(cid, {})
-    productos_actuales = (actual.get("productos_interes") or "").split(", ")
 
     st.divider()
 
@@ -296,27 +299,28 @@ def pagina_formulario():
         with col2:
             empresa = st.text_input("Empresa", value=actual.get("empresa") or "", key="emp" + k)
             email = st.text_input("Email", value=actual.get("email") or "", key="mail" + k)
-            giro = st.text_input(
-                "Giro de negocio",
-                value=actual.get("giro_negocio") or "",
-                placeholder="Colmado, finca, distribuidor, agroveterinaria…",
-                key="giro" + k,
+            tipo = st.selectbox(
+                "Tipo *",
+                db.TIPOS,
+                index=db.TIPOS.index(actual.get("tipo") or "Cliente"),
+                key="tipo" + k,
             )
 
-        st.markdown("**Productos de interés**")
-        cols = st.columns(len(db.PRODUCTOS))
-        seleccion = [
-            producto
-            for col, producto in zip(cols, db.PRODUCTOS)
-            if col.checkbox(producto, value=producto in productos_actuales, key=f"prod_{producto}{k}")
-        ]
+        productos = st.text_area(
+            "Productos de interés",
+            value=actual.get("productos_interes") or "",
+            placeholder="Ej.: sacos de arroz de 100 lb, maíz amarillo, abono 15-15-15…",
+            key="prod" + k,
+        )
 
-        st.markdown("")
         col3, col4 = st.columns(2)
+        # Registros con un estado que ya no existe (p. ej. el antiguo
+        # "Prospecto") abren con el primero de la lista.
+        estado_actual = actual.get("estado")
         estado = col3.selectbox(
             "Estado",
             db.ESTADOS,
-            index=db.ESTADOS.index(actual.get("estado", "Prospecto")),
+            index=db.ESTADOS.index(estado_actual) if estado_actual in db.ESTADOS else 0,
             key="estado" + k,
         )
         seguimiento = col4.date_input(
@@ -332,7 +336,7 @@ def pagina_formulario():
         )
 
         guardar = st.form_submit_button(
-            "💾 Guardar cambios" if editando else "💾 Guardar cliente", type="primary"
+            "💾 Guardar cambios" if editando else "💾 Guardar", type="primary"
         )
 
     if guardar:
@@ -345,75 +349,79 @@ def pagina_formulario():
                 "telefono": telefono.strip(),
                 "email": email.strip(),
                 "ubicacion": ubicacion.strip(),
-                "giro_negocio": giro.strip(),
-                "productos_interes": ", ".join(seleccion),
+                "productos_interes": productos.strip(),
                 "estado": estado,
+                "tipo": tipo,
                 "proximo_seguimiento": None if sin_seguimiento or not seguimiento else seguimiento.isoformat(),
             }
 
             if editando:
                 db.actualizar_cliente(conn, cid, datos)
-                avisar(f"Cliente **{datos['nombre']}** actualizado.")
+                avisar(f"{tipo} **{datos['nombre']}** actualizado.")
             else:
                 nuevo_id = db.crear_cliente(conn, datos)
                 # Vaciar el formulario de alta para que no reaparezca relleno.
                 st.session_state["alta_gen"] = st.session_state.get("alta_gen", 0) + 1
                 st.session_state["cliente_foco"] = nuevo_id
-                avisar(f"Cliente **{datos['nombre']}** registrado.")
+                avisar(f"{tipo} **{datos['nombre']}** registrado.")
             st.rerun()
 
     if not editando:
         return
 
     st.divider()
-    st.subheader("Eliminar cliente")
-    st.caption("Eliminar un cliente borra también todo su historial de contactos.")
+    st.subheader(f"Eliminar {actual['tipo'].lower()}")
+    st.caption("Eliminar un registro borra también todo su historial de contactos.")
     col5, col6 = st.columns([1, 2])
-    confirmar = col6.checkbox("Confirmo que quiero eliminar este cliente", key="conf_del" + k)
-    if col5.button("🗑️ Eliminar cliente", disabled=not confirmar):
+    confirmar = col6.checkbox("Confirmo que quiero eliminar este registro", key="conf_del" + k)
+    if col5.button("🗑️ Eliminar", disabled=not confirmar):
         db.eliminar_cliente(conn, cid)
         st.session_state["cliente_foco"] = None
-        avisar(f"Cliente **{actual['nombre']}** eliminado.", "warning")
+        avisar(f"{actual['tipo']} **{actual['nombre']}** eliminado.", "warning")
         st.rerun()
 
 
 # --------------------------------------------------------------------------
-# 3. Lista de clientes
+# 3. Lista de suplidores y clientes
 # --------------------------------------------------------------------------
+
+FILTRO_TIPO = {"Ambos": "Ambos", "Clientes": "Cliente", "Suplidores": "Suplidor"}
+
 
 def pagina_lista():
     st.title(LISTA)
 
-    col1, col2 = st.columns([3, 2])
-    busqueda = col1.text_input("🔍 Buscar", placeholder="Nombre, empresa, ubicación o giro de negocio…")
-    estado = col2.selectbox("Filtrar por estado", ["Todos"] + db.ESTADOS)
+    col1, col2, col3 = st.columns([3, 2, 2])
+    busqueda = col1.text_input("🔍 Buscar", placeholder="Nombre, empresa, ubicación o productos…")
+    tipo = col2.selectbox("Mostrar", list(FILTRO_TIPO))
+    estado = col3.selectbox("Filtrar por estado", ["Todos"] + db.ESTADOS)
 
     total = db.contar_clientes(conn)
     if total == 0:
-        st.info(f"Todavía no hay clientes registrados. Empieza en **{FORMULARIO}**.")
+        st.info(f"Todavía no hay suplidores ni clientes registrados. Empieza en **{FORMULARIO}**.")
         return
 
-    clientes = db.listar_clientes(conn, busqueda, estado)
-    st.caption(f"Mostrando **{len(clientes)}** de **{total}** clientes.")
+    clientes = db.listar_clientes(conn, busqueda, estado, FILTRO_TIPO[tipo])
+    st.caption(f"Mostrando **{len(clientes)}** de **{total}** registros.")
 
     df = tabla_clientes(clientes)
     if df.empty:
-        st.warning("Ningún cliente coincide con la búsqueda.")
+        st.warning("Ningún registro coincide con la búsqueda.")
     else:
         st.dataframe(df, width="stretch", hide_index=True)
 
-    col3, col4 = st.columns(2)
-    col3.download_button(
+    col4, col5 = st.columns(2)
+    col4.download_button(
         "⬇️ Exportar resultados a CSV",
         data=a_csv(df),
-        file_name=f"clientes_{date.today().isoformat()}.csv",
+        file_name=f"suplidores_clientes_{date.today().isoformat()}.csv",
         mime="text/csv",
         disabled=df.empty,
     )
-    col4.download_button(
-        "⬇️ Exportar TODOS los clientes a CSV",
+    col5.download_button(
+        "⬇️ Exportar TODOS a CSV",
         data=a_csv(tabla_clientes(db.listar_clientes(conn))),
-        file_name=f"clientes_completo_{date.today().isoformat()}.csv",
+        file_name=f"suplidores_clientes_completo_{date.today().isoformat()}.csv",
         mime="text/csv",
     )
 
@@ -422,11 +430,11 @@ def pagina_lista():
 
     st.divider()
     st.subheader("Acciones rápidas")
-    cid = selector_cliente("Cliente", clientes)
-    col5, col6 = st.columns(2)
-    if col5.button("✏️ Editar este cliente"):
+    cid = selector_cliente("Suplidor o cliente", clientes)
+    col6, col7 = st.columns(2)
+    if col6.button("✏️ Editar este registro"):
         ir_a(FORMULARIO, cid)
-    if col6.button("🗒️ Registrar un contacto"):
+    if col7.button("🗒️ Registrar un contacto"):
         ir_a(CONTACTOS, cid)
 
 
