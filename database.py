@@ -10,8 +10,8 @@ from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "crm.db"
 
-ESTADOS = ["Prospecto", "Negociación", "Cliente Activo", "Inactivo"]
-PRODUCTOS = ["Arroz", "Maíz", "Abono", "Otros"]
+ESTADOS = ["Negociación", "Cliente Activo", "Inactivo"]
+TIPOS = ["Cliente", "Suplidor"]
 TIPOS_CONTACTO = ["Llamada", "Email", "Reunión", "WhatsApp", "Visita"]
 RESULTADOS = [
     "Interesado",
@@ -50,7 +50,8 @@ def init_db(conn):
             ubicacion           TEXT,
             giro_negocio        TEXT,
             productos_interes   TEXT,
-            estado              TEXT NOT NULL DEFAULT 'Prospecto',
+            estado              TEXT NOT NULL DEFAULT 'Negociación',
+            tipo                TEXT NOT NULL DEFAULT 'Cliente',
             fecha_creacion      TEXT NOT NULL,
             proximo_seguimiento TEXT
         );
@@ -69,6 +70,13 @@ def init_db(conn):
             ON contactos (cliente_id, fecha DESC);
         """
     )
+
+    # Bases creadas antes de distinguir suplidores de clientes: los registros
+    # existentes quedan como "Cliente".
+    columnas = {r["name"] for r in conn.execute("PRAGMA table_info(clientes)")}
+    if "tipo" not in columnas:
+        conn.execute("ALTER TABLE clientes ADD COLUMN tipo TEXT NOT NULL DEFAULT 'Cliente'")
+
     conn.commit()
 
 
@@ -80,10 +88,10 @@ def crear_cliente(conn, datos):
     cur = conn.execute(
         """
         INSERT INTO clientes (nombre, empresa, telefono, email, ubicacion,
-                              giro_negocio, productos_interes, estado,
+                              productos_interes, estado, tipo,
                               fecha_creacion, proximo_seguimiento)
         VALUES (:nombre, :empresa, :telefono, :email, :ubicacion,
-                :giro_negocio, :productos_interes, :estado,
+                :productos_interes, :estado, :tipo,
                 :fecha_creacion, :proximo_seguimiento)
         """,
         {**datos, "fecha_creacion": date.today().isoformat()},
@@ -98,8 +106,8 @@ def actualizar_cliente(conn, cliente_id, datos):
         UPDATE clientes
            SET nombre = :nombre, empresa = :empresa, telefono = :telefono,
                email = :email, ubicacion = :ubicacion,
-               giro_negocio = :giro_negocio,
                productos_interes = :productos_interes, estado = :estado,
+               tipo = :tipo,
                proximo_seguimiento = :proximo_seguimiento
          WHERE id = :id
         """,
@@ -119,10 +127,11 @@ def obtener_cliente(conn, cliente_id):
     return dict(row) if row else None
 
 
-def listar_clientes(conn, busqueda="", estado="Todos"):
-    """Lista clientes con su último contacto y total de contactos.
+def listar_clientes(conn, busqueda="", estado="Todos", tipo="Ambos"):
+    """Lista suplidores y clientes con su último contacto y total de contactos.
 
-    La búsqueda cubre nombre, empresa, ubicación y giro de negocio.
+    La búsqueda cubre nombre, empresa, ubicación y productos de interés.
+    `tipo` filtra por "Cliente" o "Suplidor"; "Ambos" no filtra.
     """
     sql = """
         SELECT c.*,
@@ -137,13 +146,17 @@ def listar_clientes(conn, busqueda="", estado="Todos"):
     if busqueda:
         sql += """
              AND (c.nombre LIKE :q OR c.empresa LIKE :q
-                  OR c.ubicacion LIKE :q OR c.giro_negocio LIKE :q)
+                  OR c.ubicacion LIKE :q OR c.productos_interes LIKE :q)
         """
         params["q"] = f"%{busqueda}%"
 
     if estado and estado != "Todos":
         sql += " AND c.estado = :estado"
         params["estado"] = estado
+
+    if tipo and tipo != "Ambos":
+        sql += " AND c.tipo = :tipo"
+        params["tipo"] = tipo
 
     sql += " GROUP BY c.id ORDER BY c.nombre COLLATE NOCASE"
     return [dict(r) for r in conn.execute(sql, params).fetchall()]
@@ -258,13 +271,9 @@ def metricas(conn):
     total = sum(por_estado.values())
     activos = por_estado.get("Cliente Activo", 0)
 
-    por_producto = {p: 0 for p in PRODUCTOS}
-    for row in conn.execute(
-        "SELECT productos_interes FROM clientes WHERE productos_interes <> ''"
-    ):
-        for prod in (row["productos_interes"] or "").split(", "):
-            if prod in por_producto:
-                por_producto[prod] += 1
+    por_tipo = {t: 0 for t in TIPOS}
+    for row in conn.execute("SELECT tipo, COUNT(*) AS n FROM clientes GROUP BY tipo"):
+        por_tipo[row["tipo"]] = row["n"]
 
     contactos_mes = conn.execute(
         "SELECT COUNT(*) FROM contactos WHERE fecha >= ?",
@@ -274,7 +283,7 @@ def metricas(conn):
     return {
         "total": total,
         "por_estado": por_estado,
-        "por_producto": por_producto,
+        "por_tipo": por_tipo,
         "activos": activos,
         "tasa_conversion": (activos / total * 100) if total else 0.0,
         "contactos_mes": contactos_mes,
