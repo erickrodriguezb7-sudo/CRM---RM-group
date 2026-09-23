@@ -41,7 +41,7 @@ pip install -r requirements.txt
 
 | Sección | Para qué sirve |
 |---|---|
-| **📊 Dashboard** | Registros por estado, tasa de conversión, contactos del mes y quiénes llevan 7+ días sin contactar. |
+| **📊 Dashboard** | Clientes activos, seguimientos vencidos y para hoy, registros por estado y quiénes llevan 7+ días sin contactar. |
 | **➕ Agregar / Editar Suplidor o Cliente** | Alta de suplidores y clientes nuevos y edición o eliminación de los existentes. Los productos de interés se escriben libremente. |
 | **📋 Lista de Suplidores y Clientes** | Búsqueda por nombre, empresa, ubicación o productos; filtro por tipo (clientes, suplidores o ambos) y por estado; exportación a CSV. |
 | **🗒️ Historial de Contactos** | Bitácora por cliente: fecha, tipo (llamada, email, reunión, WhatsApp, visita), notas y resultado. |
@@ -53,9 +53,6 @@ pip install -r requirements.txt
 
 Los registros que tenían el antiguo estado *Prospecto* lo conservan hasta que
 se editen; al abrirlos en el formulario aparecen con *Negociación*.
-
-La **tasa de conversión** del dashboard es el porcentaje de la cartera que ya
-está en *Cliente Activo*.
 
 ---
 

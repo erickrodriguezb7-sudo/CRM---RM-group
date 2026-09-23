@@ -202,19 +202,10 @@ def pagina_dashboard():
     vencidos, para_hoy, _ = db.seguimientos(conn)
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total registrados", m["total"])
-    c2.metric("Clientes activos", m["activos"])
-    c3.metric(
-        "Tasa de conversión",
-        f"{m['tasa_conversion']:.1f}%",
-        help="Clientes activos sobre el total de la cartera.",
-    )
-    c4.metric("Contactos (últimos 30 días)", m["contactos_mes"])
-
-    c5, c6, c7 = st.columns(3)
-    c5.metric(f"Sin contactar hace {db.DIAS_SIN_CONTACTO}+ días", len(sin_contactar))
-    c6.metric("Seguimientos vencidos", len(vencidos))
-    c7.metric("Seguimientos para hoy", len(para_hoy))
+    c1.metric("Clientes activos", m["activos"])
+    c2.metric(f"Sin contactar hace {db.DIAS_SIN_CONTACTO}+ días", len(sin_contactar))
+    c3.metric("Seguimientos vencidos", len(vencidos))
+    c4.metric("Seguimientos para hoy", len(para_hoy))
 
     st.divider()
     st.subheader("Registros por estado")

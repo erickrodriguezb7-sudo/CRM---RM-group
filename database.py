@@ -352,15 +352,8 @@ def metricas(conn):
     total = sum(por_estado.values())
     activos = por_estado.get("Cliente Activo", 0)
 
-    contactos_mes = conn.execute(
-        "SELECT COUNT(*) FROM contactos WHERE fecha >= ?",
-        ((date.today() - timedelta(days=30)).isoformat(),),
-    ).fetchone()[0]
-
     return {
         "total": total,
         "por_estado": por_estado,
         "activos": activos,
-        "tasa_conversion": (activos / total * 100) if total else 0.0,
-        "contactos_mes": contactos_mes,
     }
