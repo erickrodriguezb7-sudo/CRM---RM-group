@@ -96,6 +96,7 @@ crm-suplidores/
 ├─ app.py                 # Interfaz Streamlit (las 5 secciones)
 ├─ database.py            # SQLite: tablas, consultas y métricas
 ├─ requirements.txt       # Dependencias
+├─ assets/               # Logo de RM Group (barra lateral) e ícono de la pestaña
 ├─ .streamlit/config.toml # (opcional) ajustes de tema; sin `base` fijo para que siga el modo claro/oscuro
 ├─ .venv/                 # Entorno con Streamlit y pandas ya instalados
 └─ crm.db                 # Se crea solo la primera vez que abres la app

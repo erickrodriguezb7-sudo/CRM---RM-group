@@ -23,9 +23,13 @@ if getattr(db, "MTIME_CARGA", None) != Path(db.__file__).stat().st_mtime:
 # Configuración general
 # --------------------------------------------------------------------------
 
+ASSETS = Path(__file__).parent / "assets"
+LOGO = ASSETS / "logo.png"      # logo completo (RM Group) para la barra lateral
+ICONO = ASSETS / "icono.png"    # monograma "RM" para la pestaña del navegador
+
 st.set_page_config(
-    page_title="CRM Suplidores Agrícolas",
-    page_icon="🌾",
+    page_title="CRM RM Group",
+    page_icon=str(ICONO),
     layout="wide",
 )
 
@@ -57,6 +61,11 @@ st.markdown(
           border: 1px solid rgba(128, 128, 128, 0.3);
           border-radius: 10px;
           padding: 14px 16px;
+      }
+      /* El logo lleva su fondo beige: bordes redondeados para que se vea
+         como una tarjeta sobre la barra lateral clara u oscura. */
+      section[data-testid="stSidebar"] [data-testid="stImage"] img {
+          border-radius: 10px;
       }
     </style>
     """,
@@ -601,8 +610,8 @@ if "_destino" in st.session_state:
     st.session_state["nav"] = st.session_state.pop("_destino")
 
 with st.sidebar:
-    st.title("🌾 CRM Suplidores")
-    st.caption("Productos agrícolas · arroz, maíz, abono")
+    st.image(str(LOGO), width="stretch")
+    st.caption("CRM de suplidores y clientes · arroz, maíz, abono")
     st.divider()
     pagina = st.radio("Secciones", PAGINAS, key="nav", label_visibility="collapsed")
     st.divider()
