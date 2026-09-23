@@ -45,7 +45,7 @@ pip install -r requirements.txt
 | **➕ Agregar / Editar Suplidor o Cliente** | Alta de suplidores y clientes nuevos y edición o eliminación de los existentes. Los productos de interés se escriben libremente. |
 | **📋 Lista de Suplidores y Clientes** | Búsqueda por nombre, empresa, ubicación o productos; filtro por tipo (clientes, suplidores o ambos) y por estado; exportación a CSV. |
 | **🗒️ Historial de Contactos** | Bitácora por cliente: fecha, tipo (llamada, email, reunión, WhatsApp, visita), notas y resultado. |
-| **🔔 Seguimiento** | Seguimientos vencidos, los de hoy y los próximos; botón para posponer 7 días. |
+| **🔔 Seguimiento** | Seguimientos vencidos, los de hoy y los próximos; botón para posponer los días que elijas. |
 
 ### Estados
 
@@ -63,8 +63,23 @@ está en *Cliente Activo*.
 
 - **Fecha automática**: al registrar un contacto la fecha viene puesta con el día
   de hoy; puedes cambiarla si estás anotando algo de días anteriores.
-- **Próximo seguimiento**: se puede fijar al crear o editar un cliente, y también
-  cada vez que registras un contacto (por defecto, a 7 días).
+- **Próximo seguimiento automático**: se calcula desde el último contacto (o
+  desde el alta, si nunca se ha contactado) y se recalcula al registrar o borrar
+  un contacto y al cambiar el tipo o el estado. Editar otros datos no lo toca.
+
+  | Estado | Cliente | Suplidor |
+  |---|---|---|
+  | Negociación | 3 días | 7 días |
+  | Cliente Activo | 14 días | 30 días |
+  | Inactivo | 60 días | 90 días |
+
+  El resultado del último contacto manda sobre esa tabla: *Cotización enviada*
+  2 días; *Interesado*, *Pendiente de respuesta* y *Sin respuesta* 3 días;
+  *No interesado* 60 días. *Venta cerrada* usa la tabla. Los días se cambian en
+  `DIAS_SEGUIMIENTO` y `DIAS_POR_RESULTADO` de `database.py`.
+- **Posponer**: en *Seguimiento* eliges cuántos días. Un seguimiento vencido se
+  pospone desde hoy; uno futuro, desde su fecha programada. Se mantiene hasta el
+  próximo recálculo.
 - **Exportar a CSV**: en *Lista de Clientes* exportas los resultados filtrados o
   toda la cartera; en *Historial de Contactos*, la bitácora de un cliente. Los
   archivos salen en UTF-8 con BOM para que Excel muestre bien las tildes y la ñ.

@@ -156,6 +156,11 @@ def a_fecha(fecha_iso):
     return datetime.strptime(fecha_iso, "%Y-%m-%d").date() if fecha_iso else None
 
 
+def fecha_dmy(fecha_iso):
+    """'2026-09-30' -> '30/09/2026' (vacío si no hay fecha)."""
+    return a_fecha(fecha_iso).strftime("%d/%m/%Y") if fecha_iso else ""
+
+
 def selector_cliente(label, clientes):
     """Selectbox de clientes que devuelve el id.
 
@@ -326,17 +331,14 @@ def pagina_formulario():
             index=db.ESTADOS.index(estado_actual) if estado_actual in db.ESTADOS else 0,
             key="estado" + k,
         )
-        seguimiento = col4.date_input(
-            "Próximo seguimiento",
-            value=a_fecha(actual.get("proximo_seguimiento")) if editando else date.today() + timedelta(days=7),
-            format="DD/MM/YYYY",
-            key="seg" + k,
-        )
-        sin_seguimiento = st.checkbox(
-            "Sin próximo seguimiento programado",
-            value=editando and not actual.get("proximo_seguimiento"),
-            key="nofollow" + k,
-        )
+        with col4:
+            st.markdown("**Próximo seguimiento**")
+            if editando and actual.get("proximo_seguimiento"):
+                st.markdown(f"🗓️ {fecha_dmy(actual['proximo_seguimiento'])}")
+            st.caption(
+                "Se calcula solo según el tipo, el estado y el último contacto. "
+                "Para moverlo a mano, usa *Posponer* en 🔔 Seguimiento."
+            )
 
         guardar = st.form_submit_button(
             "💾 Guardar cambios" if editando else "💾 Guardar", type="primary"
@@ -355,7 +357,6 @@ def pagina_formulario():
                 "productos_interes": productos.strip(),
                 "estado": estado,
                 "tipo": tipo,
-                "proximo_seguimiento": None if sin_seguimiento or not seguimiento else seguimiento.isoformat(),
             }
 
             if editando:
@@ -460,7 +461,7 @@ def pagina_contactos():
     col1, col2, col3 = st.columns(3)
     col1.metric("Estado", cliente["estado"])
     col2.metric("Teléfono", cliente["telefono"] or "—")
-    col3.metric("Próximo seguimiento", cliente["proximo_seguimiento"] or "Sin programar")
+    col3.metric("Próximo seguimiento", fecha_dmy(cliente["proximo_seguimiento"]) or "Sin programar")
 
     st.divider()
     st.subheader("Registrar nuevo contacto")
@@ -473,24 +474,13 @@ def pagina_contactos():
         resultado = col6.selectbox("Resultado", db.RESULTADOS)
 
         notas = st.text_area("Notas", placeholder="Qué se habló, cantidades, precios, compromisos…")
-
-        col7, col8 = st.columns(2)
-        programar = col7.checkbox("Programar próximo seguimiento", value=True)
-        proximo = col8.date_input(
-            "Fecha del próximo seguimiento",
-            value=date.today() + timedelta(days=7),
-            format="DD/MM/YYYY",
-        )
+        st.caption("El próximo seguimiento se calcula solo a partir de la fecha y el resultado.")
 
         guardar = st.form_submit_button("💾 Guardar contacto", type="primary")
 
     if guardar:
-        db.agregar_contacto(conn, cid, fecha, tipo, notas.strip(), resultado)
-        if programar:
-            db.fijar_proximo_seguimiento(conn, cid, proximo)
-            avisar(f"Contacto registrado. Próximo seguimiento: {proximo.strftime('%d/%m/%Y')}.")
-        else:
-            avisar("Contacto registrado.")
+        proximo = db.agregar_contacto(conn, cid, fecha, tipo, notas.strip(), resultado)
+        avisar(f"Contacto registrado. Próximo seguimiento: {proximo.strftime('%d/%m/%Y')}.")
         st.rerun()
 
     st.divider()
@@ -553,13 +543,20 @@ def bloque_seguimiento(titulo, filas, mensaje_vacio):
             col2.markdown(
                 f"📞 {c['telefono'] or '—'}  \nÚltimo contacto: {c['ultimo_contacto'] or 'Nunca'}"
             )
-            col3.markdown(f"{aviso}  \nProgramado: {c['proximo_seguimiento']}")
+            col3.markdown(f"{aviso}  \nProgramado: {fecha_dmy(c['proximo_seguimiento'])}")
 
-            col4, col5 = st.columns(2)
+            col4, col5, col6 = st.columns([2, 1, 1], vertical_alignment="bottom")
             if col4.button("🗒️ Registrar contacto", key=f"seg_contacto_{c['id']}"):
                 ir_a(CONTACTOS, c["id"])
-            if col5.button("⏭️ Posponer 7 días", key=f"seg_posponer_{c['id']}"):
-                nueva = a_fecha(c["proximo_seguimiento"]) + timedelta(days=7)
+            dias_posponer = col5.number_input(
+                "Posponer (días)", min_value=1, max_value=365, value=7, step=1,
+                key=f"seg_dias_{c['id']}",
+            )
+            if col6.button("⏭️ Posponer", key=f"seg_posponer_{c['id']}"):
+                # Un seguimiento vencido se pospone desde hoy; uno futuro, desde
+                # su fecha programada.
+                desde = max(date.today(), a_fecha(c["proximo_seguimiento"]))
+                nueva = desde + timedelta(days=int(dias_posponer))
                 db.fijar_proximo_seguimiento(conn, c["id"], nueva)
                 avisar(f"{c['nombre']}: seguimiento movido al {nueva.strftime('%d/%m/%Y')}.", "info")
                 st.rerun()
@@ -586,25 +583,26 @@ def pagina_seguimiento():
     bloque_seguimiento(f"🟢 Próximos {dias} días", proximos, "Nada programado en ese rango.")
 
     st.divider()
-    st.subheader("Clientes sin seguimiento programado")
-    sin_programar = [c for c in db.listar_clientes(conn) if not c["proximo_seguimiento"]]
-    if not sin_programar:
-        st.caption("Todos los clientes tienen una fecha de seguimiento.")
-    else:
+    with st.expander("¿Cómo se calcula el próximo seguimiento?"):
+        st.markdown(
+            "Se cuenta desde el **último contacto** (o desde el alta, si nunca se ha "
+            "contactado). Se recalcula al registrar o borrar un contacto y al cambiar "
+            "el tipo o el estado. *Posponer* lo mueve a mano hasta el próximo recálculo."
+        )
+        st.markdown("**Según tipo y estado (días)**")
         st.dataframe(
-            tabla_clientes(
-                sin_programar,
-                {
-                    "nombre": "Nombre",
-                    "empresa": "Empresa",
-                    "telefono": "Teléfono",
-                    "estado": "Estado",
-                    "ultimo_contacto": "Último contacto",
-                },
+            pd.DataFrame(db.DIAS_SEGUIMIENTO).rename_axis("Estado"),
+            width="content",
+        )
+        st.markdown("**Según el resultado del último contacto (manda sobre la tabla anterior)**")
+        st.dataframe(
+            pd.DataFrame(
+                {"Resultado": list(db.DIAS_POR_RESULTADO), "Días": list(db.DIAS_POR_RESULTADO.values())}
             ),
-            width="stretch",
+            width="content",
             hide_index=True,
         )
+        st.caption("*Venta cerrada* usa los días de la tabla por tipo y estado.")
 
 
 # --------------------------------------------------------------------------
