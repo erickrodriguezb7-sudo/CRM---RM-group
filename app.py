@@ -3,12 +3,21 @@
 Ejecutar con:  streamlit run app.py
 """
 
+import importlib
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
 import database as db
+
+# Al actualizar el código, Streamlit vuelve a ejecutar app.py pero a veces sigue
+# usando el database.py viejo que ya tenía en memoria (así falló el despliegue
+# del seguimiento automático: "database has no attribute DIAS_SEGUIMIENTO").
+# Si el archivo cambió desde que se cargó, se vuelve a cargar.
+if getattr(db, "MTIME_CARGA", None) != Path(db.__file__).stat().st_mtime:
+    db = importlib.reload(db)
 
 # --------------------------------------------------------------------------
 # Configuración general
