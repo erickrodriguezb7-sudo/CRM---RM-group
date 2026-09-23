@@ -58,12 +58,15 @@ st.markdown(
 
 @st.cache_resource
 def conexion():
-    conn = db.get_conn()
-    db.init_db(conn)
-    return conn
+    return db.get_conn()
 
 
 conn = conexion()
+# Fuera de la caché a propósito: la conexión cacheada sobrevive a las
+# actualizaciones del código, así que si init_db solo corriera al crearla, las
+# columnas nuevas (p. ej. `tipo`) nunca se agregarían a una base existente.
+# Es barato: solo crea lo que falta.
+db.init_db(conn)
 
 DASHBOARD = "📊 Dashboard"
 FORMULARIO = "➕ Agregar / Editar Suplidor o Cliente"
