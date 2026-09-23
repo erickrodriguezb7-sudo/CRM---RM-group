@@ -1,11 +1,15 @@
 """Capa de acceso a datos del CRM (SQLite).
 
 Todas las fechas se guardan como texto ISO 'YYYY-MM-DD' para que las
-comparaciones y los ordenamientos funcionen directamente en SQL.
+comparaciones y los ordenamientos funcionen directamente en SQL (el último
+acceso de cada usuario lleva además la hora: 'YYYY-MM-DD HH:MM').
 """
 
+import hashlib
+import hmac
+import secrets
 import sqlite3
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "crm.db"
@@ -44,6 +48,15 @@ DIAS_POR_RESULTADO = {
     "Sin respuesta": 3,
     "No interesado": 60,
 }
+
+ADMIN = "Administrador"
+ROLES = [ADMIN, "Usuario"]
+LARGO_MIN_CONTRASENA = 8
+
+# PBKDF2 de la biblioteca estándar: sin dependencias nuevas. Las iteraciones se
+# guardan junto a cada hash, así que subirlas más adelante no invalida las
+# contraseñas ya guardadas.
+ITERACIONES_HASH = 600_000
 
 
 # --------------------------------------------------------------------------
@@ -89,6 +102,17 @@ def init_db(conn):
 
         CREATE INDEX IF NOT EXISTS idx_contactos_cliente
             ON contactos (cliente_id, fecha DESC);
+
+        CREATE TABLE IF NOT EXISTS usuarios (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            usuario         TEXT NOT NULL UNIQUE COLLATE NOCASE,
+            nombre          TEXT NOT NULL,
+            contrasena_hash TEXT NOT NULL,
+            rol             TEXT NOT NULL DEFAULT 'Usuario',
+            activo          INTEGER NOT NULL DEFAULT 1,
+            fecha_creacion  TEXT NOT NULL,
+            ultimo_acceso   TEXT
+        );
         """
     )
 
@@ -357,3 +381,102 @@ def metricas(conn):
         "por_estado": por_estado,
         "activos": activos,
     }
+
+
+# --------------------------------------------------------------------------
+# Usuarios y acceso
+# --------------------------------------------------------------------------
+
+# Nunca se lee el hash fuera de este módulo.
+COLUMNAS_USUARIO = "id, usuario, nombre, rol, activo, fecha_creacion, ultimo_acceso"
+
+
+def hash_contrasena(contrasena, sal=None, iteraciones=ITERACIONES_HASH):
+    """'pbkdf2_sha256$iteraciones$sal$hash' (sal aleatoria si no se da)."""
+    sal = sal or secrets.token_hex(16)
+    h = hashlib.pbkdf2_hmac("sha256", contrasena.encode(), sal.encode(), iteraciones).hex()
+    return f"pbkdf2_sha256${iteraciones}${sal}${h}"
+
+
+def verificar_contrasena(contrasena, guardado):
+    _, iteraciones, sal, _ = guardado.split("$")
+    return hmac.compare_digest(hash_contrasena(contrasena, sal, int(iteraciones)), guardado)
+
+
+def contar_usuarios(conn):
+    return conn.execute("SELECT COUNT(*) FROM usuarios").fetchone()[0]
+
+
+def crear_usuario(conn, usuario, nombre, contrasena, rol):
+    """Devuelve el id nuevo, o None si ya existe ese nombre de usuario
+    (sin distinguir mayúsculas)."""
+    try:
+        cur = conn.execute(
+            """
+            INSERT INTO usuarios (usuario, nombre, contrasena_hash, rol, fecha_creacion)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (usuario, nombre, hash_contrasena(contrasena), rol, date.today().isoformat()),
+        )
+    except sqlite3.IntegrityError:
+        return None
+    conn.commit()
+    return cur.lastrowid
+
+
+def autenticar(conn, usuario, contrasena):
+    """Devuelve el usuario si las credenciales son válidas y la cuenta está
+    activa; si no, None. Un acceso correcto queda registrado con fecha y hora."""
+    row = conn.execute(
+        "SELECT id, contrasena_hash, activo FROM usuarios WHERE usuario = ?", (usuario.strip(),)
+    ).fetchone()
+    if not row:
+        # Mismo tiempo de respuesta que con un usuario real, para no delatar
+        # qué nombres existen.
+        hash_contrasena(contrasena)
+        return None
+    if not verificar_contrasena(contrasena, row["contrasena_hash"]) or not row["activo"]:
+        return None
+    conn.execute(
+        "UPDATE usuarios SET ultimo_acceso = ? WHERE id = ?",
+        (datetime.now().strftime("%Y-%m-%d %H:%M"), row["id"]),
+    )
+    conn.commit()
+    return obtener_usuario(conn, row["id"])
+
+
+def obtener_usuario(conn, usuario_id):
+    row = conn.execute(
+        f"SELECT {COLUMNAS_USUARIO} FROM usuarios WHERE id = ?", (usuario_id,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def listar_usuarios(conn):
+    return [
+        dict(r)
+        for r in conn.execute(
+            f"SELECT {COLUMNAS_USUARIO} FROM usuarios ORDER BY nombre COLLATE NOCASE"
+        ).fetchall()
+    ]
+
+
+def actualizar_usuario(conn, usuario_id, nombre, rol, activo):
+    conn.execute(
+        "UPDATE usuarios SET nombre = ?, rol = ?, activo = ? WHERE id = ?",
+        (nombre, rol, int(activo), usuario_id),
+    )
+    conn.commit()
+
+
+def cambiar_contrasena(conn, usuario_id, contrasena):
+    conn.execute(
+        "UPDATE usuarios SET contrasena_hash = ? WHERE id = ?",
+        (hash_contrasena(contrasena), usuario_id),
+    )
+    conn.commit()
+
+
+def eliminar_usuario(conn, usuario_id):
+    conn.execute("DELETE FROM usuarios WHERE id = ?", (usuario_id,))
+    conn.commit()

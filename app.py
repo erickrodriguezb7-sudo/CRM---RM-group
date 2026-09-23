@@ -90,6 +90,7 @@ FORMULARIO = "➕ Agregar / Editar Suplidor o Cliente"
 LISTA = "📋 Lista de Suplidores y Clientes"
 CONTACTOS = "🗒️ Historial de Contactos"
 SEGUIMIENTO = "🔔 Seguimiento"
+USUARIOS = "👥 Usuarios"   # solo para administradores
 
 PAGINAS = [DASHBOARD, FORMULARIO, LISTA, CONTACTOS, SEGUIMIENTO]
 
@@ -192,6 +193,112 @@ def selector_cliente(label, clientes):
     cid = st.selectbox(label, ids, index=indice, format_func=lambda i: etiqueta_cliente(por_id[i]))
     st.session_state["cliente_foco"] = cid
     return cid
+
+
+# --------------------------------------------------------------------------
+# Acceso con usuario y contraseña
+# --------------------------------------------------------------------------
+
+def usuario_actual():
+    """Usuario con sesión iniciada, o None.
+
+    Se vuelve a leer de la base en cada pasada: si un administrador desactiva o
+    elimina la cuenta, la sesión abierta se cierra en el siguiente clic.
+    """
+    uid = st.session_state.get("usuario_id")
+    if uid is None:
+        return None
+    usuario = db.obtener_usuario(conn, uid)
+    if not usuario or not usuario["activo"]:
+        st.session_state.clear()
+        return None
+    return usuario
+
+
+def validar_usuario(usuario, nombre):
+    """Mensaje de error, o None si los datos sirven."""
+    if not nombre.strip():
+        return "El nombre es obligatorio."
+    if not usuario.strip():
+        return "El usuario es obligatorio."
+    if " " in usuario.strip():
+        return "El usuario no puede llevar espacios."
+    return None
+
+
+def validar_contrasena(contrasena, confirmacion):
+    """Mensaje de error, o None si la contraseña sirve."""
+    if len(contrasena) < db.LARGO_MIN_CONTRASENA:
+        return f"La contraseña debe tener al menos {db.LARGO_MIN_CONTRASENA} caracteres."
+    if contrasena != confirmacion:
+        return "Las contraseñas no coinciden."
+    return None
+
+
+def formulario_login():
+    st.subheader("Iniciar sesión")
+    with st.form("form_login"):
+        usuario = st.text_input("Usuario")
+        contrasena = st.text_input("Contraseña", type="password")
+        entrar = st.form_submit_button("Entrar", type="primary")
+
+    if entrar:
+        encontrado = db.autenticar(conn, usuario, contrasena)
+        if encontrado:
+            st.session_state["usuario_id"] = encontrado["id"]
+            st.rerun()
+        st.error("Usuario o contraseña incorrectos, o la cuenta está desactivada.")
+
+
+def formulario_primer_admin():
+    """Solo aparece mientras no exista ningún usuario."""
+    st.subheader("Crear la cuenta de administrador")
+    st.caption(
+        "Todavía no hay usuarios. Esta primera cuenta será de administrador y "
+        f"podrá dar acceso a los demás desde **{USUARIOS}**."
+    )
+    with st.form("form_primer_admin"):
+        nombre = st.text_input("Nombre completo")
+        usuario = st.text_input("Usuario", help="Con este nombre se inicia sesión. Sin espacios.")
+        contrasena = st.text_input("Contraseña", type="password")
+        confirmacion = st.text_input("Confirmar contraseña", type="password")
+        crear = st.form_submit_button("Crear cuenta y entrar", type="primary")
+
+    if crear:
+        error = validar_usuario(usuario, nombre) or validar_contrasena(contrasena, confirmacion)
+        if error:
+            st.error(error)
+            return
+        uid = db.crear_usuario(conn, usuario.strip(), nombre.strip(), contrasena, db.ADMIN)
+        st.session_state["usuario_id"] = uid
+        st.rerun()
+
+
+def pantalla_acceso():
+    _, centro, _ = st.columns([1, 1.4, 1])
+    with centro:
+        st.image(str(LOGO), width="stretch")
+        if db.contar_usuarios(conn) == 0:
+            formulario_primer_admin()
+        else:
+            formulario_login()
+
+
+def formulario_mi_contrasena(usuario):
+    with st.form("form_mi_contrasena", clear_on_submit=True):
+        actual = st.text_input("Contraseña actual", type="password")
+        nueva = st.text_input("Nueva contraseña", type="password")
+        confirmacion = st.text_input("Confirmar nueva", type="password")
+        cambiar = st.form_submit_button("Cambiar")
+
+    if cambiar:
+        if not db.autenticar(conn, usuario["usuario"], actual):
+            st.error("La contraseña actual no es correcta.")
+        elif error := validar_contrasena(nueva, confirmacion):
+            st.error(error)
+        else:
+            db.cambiar_contrasena(conn, usuario["id"], nueva)
+            st.success("Contraseña cambiada.")
 
 
 # --------------------------------------------------------------------------
@@ -602,24 +709,159 @@ def pagina_seguimiento():
 
 
 # --------------------------------------------------------------------------
+# 6. Usuarios (solo administradores)
+# --------------------------------------------------------------------------
+
+def pagina_usuarios():
+    st.title(USUARIOS)
+    st.caption("Quién puede entrar al CRM. Solo los administradores ven esta sección.")
+    mostrar_aviso()
+
+    usuarios = db.listar_usuarios(conn)
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Usuario": u["usuario"],
+                    "Nombre": u["nombre"],
+                    "Rol": u["rol"],
+                    "Cuenta": "Activa" if u["activo"] else "Desactivada",
+                    "Alta": fecha_dmy(u["fecha_creacion"]),
+                    "Último acceso": u["ultimo_acceso"] or "Nunca",
+                }
+                for u in usuarios
+            ]
+        ),
+        width="stretch",
+        hide_index=True,
+    )
+
+    st.divider()
+    st.subheader("Dar acceso a un usuario nuevo")
+
+    # Mismo truco que el alta de clientes: el contador vacía el formulario tras
+    # crear la cuenta, pero lo conserva relleno si hubo un error.
+    k = f"_{st.session_state.get('usuario_gen', 0)}"
+    with st.form("form_usuario_nuevo"):
+        col1, col2 = st.columns(2)
+        nombre = col1.text_input("Nombre completo *", key="u_nombre" + k)
+        usuario = col2.text_input(
+            "Usuario *", help="Con este nombre inicia sesión. Sin espacios.", key="u_usuario" + k
+        )
+        contrasena = col1.text_input("Contraseña *", type="password", key="u_clave" + k)
+        confirmacion = col2.text_input("Confirmar contraseña *", type="password", key="u_conf" + k)
+        rol = st.selectbox("Rol", db.ROLES, index=db.ROLES.index("Usuario"), key="u_rol" + k)
+        crear = st.form_submit_button("➕ Crear usuario", type="primary")
+
+    if crear:
+        error = validar_usuario(usuario, nombre) or validar_contrasena(contrasena, confirmacion)
+        if error:
+            st.error(error)
+        elif db.crear_usuario(conn, usuario.strip(), nombre.strip(), contrasena, rol) is None:
+            st.error(f"Ya existe el usuario **{usuario.strip()}**.")
+        else:
+            st.session_state["usuario_gen"] = st.session_state.get("usuario_gen", 0) + 1
+            avisar(f"Usuario **{usuario.strip()}** creado. Ya puede iniciar sesión.")
+            st.rerun()
+
+    st.divider()
+    st.subheader("Editar un usuario")
+
+    por_id = {u["id"]: u for u in usuarios}
+    uid = st.selectbox(
+        "Usuario",
+        list(por_id),
+        format_func=lambda i: f"{por_id[i]['nombre']} ({por_id[i]['usuario']})",
+    )
+    u = por_id[uid]
+    es_yo = uid == sesion["id"]
+    k = f"_{uid}"
+
+    with st.form("form_usuario_editar"):
+        nombre = st.text_input("Nombre completo", value=u["nombre"], key="ue_nombre" + k)
+        col1, col2 = st.columns(2, vertical_alignment="bottom")
+        rol = col1.selectbox(
+            "Rol", db.ROLES, index=db.ROLES.index(u["rol"]), disabled=es_yo, key="ue_rol" + k
+        )
+        activo = col2.checkbox(
+            "Cuenta activa", value=bool(u["activo"]), disabled=es_yo, key="ue_activo" + k
+        )
+        if es_yo:
+            st.caption("No puedes quitarte el rol de administrador ni desactivar tu propia cuenta.")
+        guardar = st.form_submit_button("💾 Guardar cambios", type="primary")
+
+    if guardar:
+        if not nombre.strip():
+            st.error("El nombre es obligatorio.")
+        else:
+            db.actualizar_usuario(conn, uid, nombre.strip(), rol, activo)
+            avisar(f"Usuario **{u['usuario']}** actualizado.")
+            st.rerun()
+
+    with st.form("form_usuario_clave", clear_on_submit=True):
+        st.markdown("**Restablecer contraseña**")
+        col3, col4 = st.columns(2)
+        nueva = col3.text_input("Nueva contraseña", type="password", key="ue_clave" + k)
+        confirmacion = col4.text_input("Confirmar", type="password", key="ue_conf" + k)
+        restablecer = st.form_submit_button("🔑 Restablecer contraseña")
+
+    if restablecer:
+        if error := validar_contrasena(nueva, confirmacion):
+            st.error(error)
+        else:
+            db.cambiar_contrasena(conn, uid, nueva)
+            avisar(f"Contraseña de **{u['usuario']}** restablecida.")
+            st.rerun()
+
+    if es_yo:
+        return
+
+    st.caption("Para quitar el acceso sin borrar la cuenta, desmarca *Cuenta activa*.")
+    col5, col6 = st.columns([1, 2])
+    confirmar = col6.checkbox("Confirmo que quiero eliminar este usuario", key="ue_del" + k)
+    if col5.button("🗑️ Eliminar usuario", disabled=not confirmar):
+        db.eliminar_usuario(conn, uid)
+        avisar(f"Usuario **{u['usuario']}** eliminado.", "warning")
+        st.rerun()
+
+
+# --------------------------------------------------------------------------
 # Navegación
 # --------------------------------------------------------------------------
+
+# Sin sesión no se muestra nada del CRM, solo la pantalla de acceso.
+sesion = usuario_actual()
+if sesion is None:
+    pantalla_acceso()
+    st.stop()
+
+paginas = PAGINAS + ([USUARIOS] if sesion["rol"] == db.ADMIN else [])
 
 # Debe aplicarse antes de crear el radio del menú.
 if "_destino" in st.session_state:
     st.session_state["nav"] = st.session_state.pop("_destino")
+# Un administrador al que le quitaron el rol puede tener aún 👥 Usuarios elegido.
+if st.session_state.get("nav") not in paginas:
+    st.session_state["nav"] = DASHBOARD
 
 with st.sidebar:
     st.image(str(LOGO), width="stretch")
     st.caption("CRM de suplidores y clientes · arroz, maíz, abono")
+    st.markdown(f"👤 **{sesion['nombre']}** · {sesion['rol']}")
     st.divider()
-    pagina = st.radio("Secciones", PAGINAS, key="nav", label_visibility="collapsed")
+    pagina = st.radio("Secciones", paginas, key="nav", label_visibility="collapsed")
     st.divider()
 
     _vencidos, _hoy, _ = db.seguimientos(conn)
     pendientes = len(_vencidos) + len(_hoy)
     if pendientes:
         st.warning(f"**{pendientes}** seguimiento(s) vencido(s) o para hoy.")
+
+    with st.expander("🔑 Cambiar mi contraseña"):
+        formulario_mi_contrasena(sesion)
+    if st.button("🚪 Cerrar sesión"):
+        st.session_state.clear()
+        st.rerun()
     st.caption(f"Base de datos: `{db.DB_PATH.name}`")
 
 VISTAS = {
@@ -628,6 +870,7 @@ VISTAS = {
     LISTA: pagina_lista,
     CONTACTOS: pagina_contactos,
     SEGUIMIENTO: pagina_seguimiento,
+    USUARIOS: pagina_usuarios,
 }
 
 VISTAS[pagina]()
