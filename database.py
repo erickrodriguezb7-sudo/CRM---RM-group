@@ -24,6 +24,23 @@ RESULTADOS = [
 
 DIAS_SIN_CONTACTO = 7
 
+# Días desde el último contacto (o desde el alta, si nunca se contactó) hasta
+# el próximo seguimiento, según tipo y estado.
+DIAS_SEGUIMIENTO = {
+    "Cliente": {"Negociación": 3, "Cliente Activo": 14, "Inactivo": 60},
+    "Suplidor": {"Negociación": 7, "Cliente Activo": 30, "Inactivo": 90},
+}
+
+# El resultado del último contacto manda sobre la tabla anterior. Los que no
+# aparecen aquí ("Venta cerrada") usan los días del tipo y estado.
+DIAS_POR_RESULTADO = {
+    "Cotización enviada": 2,
+    "Interesado": 3,
+    "Pendiente de respuesta": 3,
+    "Sin respuesta": 3,
+    "No interesado": 60,
+}
+
 
 # --------------------------------------------------------------------------
 # Conexión e inicialización
@@ -77,6 +94,13 @@ def init_db(conn):
     if "tipo" not in columnas:
         conn.execute("ALTER TABLE clientes ADD COLUMN tipo TEXT NOT NULL DEFAULT 'Cliente'")
 
+    # El seguimiento ya no se fija a mano: los registros que quedaron sin fecha
+    # reciben la calculada.
+    for row in conn.execute(
+        "SELECT id FROM clientes WHERE proximo_seguimiento IS NULL OR proximo_seguimiento = ''"
+    ).fetchall():
+        recalcular_seguimiento(conn, row["id"], commit=False)
+
     conn.commit()
 
 
@@ -88,31 +112,36 @@ def crear_cliente(conn, datos):
     cur = conn.execute(
         """
         INSERT INTO clientes (nombre, empresa, telefono, email, ubicacion,
-                              productos_interes, estado, tipo,
-                              fecha_creacion, proximo_seguimiento)
+                              productos_interes, estado, tipo, fecha_creacion)
         VALUES (:nombre, :empresa, :telefono, :email, :ubicacion,
-                :productos_interes, :estado, :tipo,
-                :fecha_creacion, :proximo_seguimiento)
+                :productos_interes, :estado, :tipo, :fecha_creacion)
         """,
         {**datos, "fecha_creacion": date.today().isoformat()},
     )
-    conn.commit()
+    recalcular_seguimiento(conn, cur.lastrowid)
     return cur.lastrowid
 
 
 def actualizar_cliente(conn, cliente_id, datos):
+    """Guarda los datos del registro.
+
+    El seguimiento solo se recalcula si cambia el tipo o el estado; corregir un
+    teléfono no debe deshacer un seguimiento pospuesto a mano.
+    """
+    antes = obtener_cliente(conn, cliente_id)
     conn.execute(
         """
         UPDATE clientes
            SET nombre = :nombre, empresa = :empresa, telefono = :telefono,
                email = :email, ubicacion = :ubicacion,
                productos_interes = :productos_interes, estado = :estado,
-               tipo = :tipo,
-               proximo_seguimiento = :proximo_seguimiento
+               tipo = :tipo
          WHERE id = :id
         """,
         {**datos, "id": cliente_id},
     )
+    if (antes["tipo"], antes["estado"]) != (datos["tipo"], datos["estado"]):
+        recalcular_seguimiento(conn, cliente_id, commit=False)
     conn.commit()
 
 
@@ -171,6 +200,7 @@ def contar_clientes(conn):
 # --------------------------------------------------------------------------
 
 def agregar_contacto(conn, cliente_id, fecha, tipo_contacto, notas, resultado):
+    """Registra el contacto y devuelve el próximo seguimiento recalculado."""
     conn.execute(
         """
         INSERT INTO contactos (cliente_id, fecha, tipo_contacto, notas, resultado)
@@ -178,11 +208,14 @@ def agregar_contacto(conn, cliente_id, fecha, tipo_contacto, notas, resultado):
         """,
         (cliente_id, fecha.isoformat(), tipo_contacto, notas, resultado),
     )
-    conn.commit()
+    return recalcular_seguimiento(conn, cliente_id)
 
 
 def eliminar_contacto(conn, contacto_id):
+    row = conn.execute("SELECT cliente_id FROM contactos WHERE id = ?", (contacto_id,)).fetchone()
     conn.execute("DELETE FROM contactos WHERE id = ?", (contacto_id,))
+    if row:
+        recalcular_seguimiento(conn, row["cliente_id"], commit=False)
     conn.commit()
 
 
@@ -198,6 +231,50 @@ def listar_contactos(conn, cliente_id=None):
         params = (cliente_id,)
     sql += " ORDER BY ct.fecha DESC, ct.id DESC"
     return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def dias_hasta_seguimiento(tipo, estado, ultimo_resultado=None):
+    """Días entre el último contacto y el próximo seguimiento."""
+    if ultimo_resultado in DIAS_POR_RESULTADO:
+        return DIAS_POR_RESULTADO[ultimo_resultado]
+    por_estado = DIAS_SEGUIMIENTO.get(tipo, DIAS_SEGUIMIENTO["Cliente"])
+    # Estados que ya no existen (el antiguo "Prospecto") cuentan como Negociación.
+    return por_estado.get(estado, por_estado["Negociación"])
+
+
+def recalcular_seguimiento(conn, cliente_id, commit=True):
+    """Fija el próximo seguimiento a partir del último contacto (o del alta).
+
+    Devuelve la nueva fecha, o None si el registro no existe.
+    """
+    cliente = conn.execute(
+        "SELECT tipo, estado, fecha_creacion FROM clientes WHERE id = ?", (cliente_id,)
+    ).fetchone()
+    if not cliente:
+        return None
+
+    ultimo = conn.execute(
+        """
+        SELECT fecha, resultado FROM contactos
+         WHERE cliente_id = ?
+         ORDER BY fecha DESC, id DESC
+         LIMIT 1
+        """,
+        (cliente_id,),
+    ).fetchone()
+
+    base = date.fromisoformat(ultimo["fecha"] if ultimo else cliente["fecha_creacion"])
+    dias = dias_hasta_seguimiento(
+        cliente["tipo"], cliente["estado"], ultimo["resultado"] if ultimo else None
+    )
+    nueva = base + timedelta(days=dias)
+    conn.execute(
+        "UPDATE clientes SET proximo_seguimiento = ? WHERE id = ?",
+        (nueva.isoformat(), cliente_id),
+    )
+    if commit:
+        conn.commit()
+    return nueva
 
 
 def fijar_proximo_seguimiento(conn, cliente_id, fecha):
