@@ -30,7 +30,6 @@ st.set_page_config(
 )
 
 VERDE = "#2E7D32"   # hue única para los gráficos de cartera
-TEAL = "#00897B"    # hue única para el gráfico por tipo
 
 # Sin colores fijos de texto ni de fondo: Streamlit sigue el modo claro/oscuro
 # del navegador, y un color fijo (p. ej. títulos verde oscuro) desaparece en
@@ -218,25 +217,13 @@ def pagina_dashboard():
     c7.metric("Seguimientos para hoy", len(para_hoy))
 
     st.divider()
-    izq, der = st.columns(2)
-
-    with izq:
-        st.subheader("Registros por estado")
-        df_estado = pd.DataFrame(
-            {"Estado": list(m["por_estado"]), "Registros": list(m["por_estado"].values())}
-        ).set_index("Estado")
-        st.bar_chart(df_estado, color=VERDE, horizontal=True, height=260)
-        with st.expander("Ver como tabla"):
-            st.dataframe(df_estado, width="stretch")
-
-    with der:
-        st.subheader("Suplidores y clientes")
-        df_tipo = pd.DataFrame(
-            {"Tipo": list(m["por_tipo"]), "Registros": list(m["por_tipo"].values())}
-        ).set_index("Tipo")
-        st.bar_chart(df_tipo, color=TEAL, horizontal=True, height=260)
-        with st.expander("Ver como tabla"):
-            st.dataframe(df_tipo, width="stretch")
+    st.subheader("Registros por estado")
+    df_estado = pd.DataFrame(
+        {"Estado": list(m["por_estado"]), "Registros": list(m["por_estado"].values())}
+    ).set_index("Estado")
+    st.bar_chart(df_estado, color=VERDE, horizontal=True, height=260)
+    with st.expander("Ver como tabla"):
+        st.dataframe(df_estado, width="stretch")
 
     st.divider()
     st.subheader(f"⏰ Clientes sin contactar hace {db.DIAS_SIN_CONTACTO} días o más")
