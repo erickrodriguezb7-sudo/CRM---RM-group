@@ -10,6 +10,10 @@ from pathlib import Path
 
 DB_PATH = Path(__file__).parent / "crm.db"
 
+# Fecha de modificación de este archivo al cargarlo; app.py la compara para
+# saber si el módulo en memoria quedó viejo tras una actualización del código.
+MTIME_CARGA = Path(__file__).stat().st_mtime
+
 ESTADOS = ["Negociación", "Cliente Activo", "Inactivo"]
 TIPOS = ["Cliente", "Suplidor"]
 TIPOS_CONTACTO = ["Llamada", "Email", "Reunión", "WhatsApp", "Visita"]
