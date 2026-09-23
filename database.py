@@ -352,20 +352,8 @@ def metricas(conn):
     total = sum(por_estado.values())
     activos = por_estado.get("Cliente Activo", 0)
 
-    por_tipo = {t: 0 for t in TIPOS}
-    for row in conn.execute("SELECT tipo, COUNT(*) AS n FROM clientes GROUP BY tipo"):
-        por_tipo[row["tipo"]] = row["n"]
-
-    contactos_mes = conn.execute(
-        "SELECT COUNT(*) FROM contactos WHERE fecha >= ?",
-        ((date.today() - timedelta(days=30)).isoformat(),),
-    ).fetchone()[0]
-
     return {
         "total": total,
         "por_estado": por_estado,
-        "por_tipo": por_tipo,
         "activos": activos,
-        "tasa_conversion": (activos / total * 100) if total else 0.0,
-        "contactos_mes": contactos_mes,
     }

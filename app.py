@@ -23,14 +23,17 @@ if getattr(db, "MTIME_CARGA", None) != Path(db.__file__).stat().st_mtime:
 # Configuración general
 # --------------------------------------------------------------------------
 
+ASSETS = Path(__file__).parent / "assets"
+LOGO = ASSETS / "logo.png"      # logo completo (RM Group) para la barra lateral
+ICONO = ASSETS / "icono.png"    # monograma "RM" para la pestaña del navegador
+
 st.set_page_config(
-    page_title="CRM Suplidores Agrícolas",
-    page_icon="🌾",
+    page_title="CRM RM Group",
+    page_icon=str(ICONO),
     layout="wide",
 )
 
 VERDE = "#2E7D32"   # hue única para los gráficos de cartera
-TEAL = "#00897B"    # hue única para el gráfico por tipo
 
 # Sin colores fijos de texto ni de fondo: Streamlit sigue el modo claro/oscuro
 # del navegador, y un color fijo (p. ej. títulos verde oscuro) desaparece en
@@ -58,6 +61,11 @@ st.markdown(
           border: 1px solid rgba(128, 128, 128, 0.3);
           border-radius: 10px;
           padding: 14px 16px;
+      }
+      /* El logo lleva su fondo beige: bordes redondeados para que se vea
+         como una tarjeta sobre la barra lateral clara u oscura. */
+      section[data-testid="stSidebar"] [data-testid="stImage"] img {
+          border-radius: 10px;
       }
     </style>
     """,
@@ -203,40 +211,19 @@ def pagina_dashboard():
     vencidos, para_hoy, _ = db.seguimientos(conn)
 
     c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Total registrados", m["total"])
-    c2.metric("Clientes activos", m["activos"])
-    c3.metric(
-        "Tasa de conversión",
-        f"{m['tasa_conversion']:.1f}%",
-        help="Clientes activos sobre el total de la cartera.",
-    )
-    c4.metric("Contactos (últimos 30 días)", m["contactos_mes"])
-
-    c5, c6, c7 = st.columns(3)
-    c5.metric(f"Sin contactar hace {db.DIAS_SIN_CONTACTO}+ días", len(sin_contactar))
-    c6.metric("Seguimientos vencidos", len(vencidos))
-    c7.metric("Seguimientos para hoy", len(para_hoy))
+    c1.metric("Clientes activos", m["activos"])
+    c2.metric(f"Sin contactar hace {db.DIAS_SIN_CONTACTO}+ días", len(sin_contactar))
+    c3.metric("Seguimientos vencidos", len(vencidos))
+    c4.metric("Seguimientos para hoy", len(para_hoy))
 
     st.divider()
-    izq, der = st.columns(2)
-
-    with izq:
-        st.subheader("Registros por estado")
-        df_estado = pd.DataFrame(
-            {"Estado": list(m["por_estado"]), "Registros": list(m["por_estado"].values())}
-        ).set_index("Estado")
-        st.bar_chart(df_estado, color=VERDE, horizontal=True, height=260)
-        with st.expander("Ver como tabla"):
-            st.dataframe(df_estado, width="stretch")
-
-    with der:
-        st.subheader("Suplidores y clientes")
-        df_tipo = pd.DataFrame(
-            {"Tipo": list(m["por_tipo"]), "Registros": list(m["por_tipo"].values())}
-        ).set_index("Tipo")
-        st.bar_chart(df_tipo, color=TEAL, horizontal=True, height=260)
-        with st.expander("Ver como tabla"):
-            st.dataframe(df_tipo, width="stretch")
+    st.subheader("Registros por estado")
+    df_estado = pd.DataFrame(
+        {"Estado": list(m["por_estado"]), "Registros": list(m["por_estado"].values())}
+    ).set_index("Estado")
+    st.bar_chart(df_estado, color=VERDE, horizontal=True, height=260)
+    with st.expander("Ver como tabla"):
+        st.dataframe(df_estado, width="stretch")
 
     st.divider()
     st.subheader(f"⏰ Clientes sin contactar hace {db.DIAS_SIN_CONTACTO} días o más")
@@ -623,8 +610,8 @@ if "_destino" in st.session_state:
     st.session_state["nav"] = st.session_state.pop("_destino")
 
 with st.sidebar:
-    st.title("🌾 CRM Suplidores")
-    st.caption("Productos agrícolas · arroz, maíz, abono")
+    st.image(str(LOGO), width="stretch")
+    st.caption("CRM de suplidores y clientes · arroz, maíz, abono")
     st.divider()
     pagina = st.radio("Secciones", PAGINAS, key="nav", label_visibility="collapsed")
     st.divider()
