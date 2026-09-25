@@ -68,6 +68,7 @@ pip install -r requirements.txt
 | **🗒️ Historial de Contactos** | Bitácora por cliente: fecha, tipo (llamada, email, reunión, WhatsApp, visita), notas y resultado. |
 | **🔔 Seguimiento** | Seguimientos vencidos, los de hoy y los próximos; botón para posponer los días que elijas. |
 | **👥 Usuarios** | Solo administradores: dar acceso, cambiar rol, desactivar, restablecer contraseñas y ver el último acceso de cada uno. |
+| **📜 Actividad** | Solo administradores: quién hizo qué y cuándo (altas, ediciones, contactos, asignaciones…). |
 
 ---
 
@@ -76,8 +77,18 @@ pip install -r requirements.txt
 - **Primera vez**: si la base no tiene usuarios, la app pide crear la cuenta de
   **administrador** antes de mostrar nada. Hazlo en cuanto abras la app (sobre
   todo si está publicada en internet: quien llegue primero crea esa cuenta).
-- **Roles**: *Administrador* ve todo, incluida **👥 Usuarios**. *Usuario* ve
-  todas las secciones del CRM excepto esa.
+- **Roles**: *Administrador* ve todo, incluidas **👥 Usuarios** y
+  **📜 Actividad**. *Usuario* ve todas las secciones del CRM excepto esas dos.
+- **Asignación**: cada suplidor o cliente puede tener un usuario responsable.
+  Todos ven todos los registros, pero los asignados a ti llevan ⭐, la lista se
+  filtra por *Asignado a* y en *Seguimiento* los usuarios ven primero solo los
+  suyos. Lo que registra un usuario queda asignado a él; solo el administrador
+  cambia la asignación (en el formulario de edición, o varios a la vez al final
+  de la *Lista*).
+- **Actividad**: cada inicio de sesión, alta, edición (con qué cambió),
+  eliminación, contacto, seguimiento pospuesto, asignación y cambio de usuarios
+  queda anotado con quién lo hizo y cuándo. Se filtra por fechas, usuario y
+  acción, y se exporta a CSV.
 - **Quitar el acceso**: desmarca *Cuenta activa* (conserva la cuenta) o elimina
   el usuario. Si esa persona tenía la sesión abierta, se cierra en su siguiente
   clic. Un administrador no puede desactivarse, eliminarse ni quitarse el rol a
@@ -163,11 +174,9 @@ crm-suplidores/
 
 **`clientes`** — `id`, `nombre`, `tipo` (`Cliente` o `Suplidor`), `empresa`,
 `telefono`, `email`, `ubicacion`, `productos_interes` (texto libre), `estado`,
-`fecha_creacion`, `proximo_seguimiento`, `giro_negocio` (ya no se usa; se
-conserva para no perder datos anteriores)
-
-La columna `tipo` se agrega sola a una base existente la primera vez que se
-abre la app; los registros anteriores quedan como `Cliente`.
+`fecha_creacion`, `proximo_seguimiento`, `asignado_a` (id del usuario
+responsable; queda vacío si ese usuario se elimina), `giro_negocio` (ya no se
+usa; se conserva para no perder datos anteriores)
 
 **`contactos`** — `id`, `cliente_id`, `fecha`, `tipo_contacto`, `notas`,
 `resultado`
@@ -175,6 +184,11 @@ abre la app; los registros anteriores quedan como `Cliente`.
 **`usuarios`** — `id`, `usuario` (único, sin distinguir mayúsculas), `nombre`,
 `contrasena_hash`, `rol` (`Administrador` o `Usuario`), `activo` (1/0),
 `fecha_creacion`, `ultimo_acceso` (`AAAA-MM-DD HH:MM`)
+
+**`actividad`** — `id`, `fecha` (`AAAA-MM-DD HH:MM:SS`, hora de República
+Dominicana), `usuario_id`, `usuario_nombre`, `accion`, `detalle`. Los nombres se
+guardan como texto para que el historial siga legible aunque luego se elimine
+el usuario o el registro.
 
 Las fechas se guardan como texto `AAAA-MM-DD`. Al borrar un cliente, sus
 contactos se eliminan en cascada.
