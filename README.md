@@ -1,9 +1,29 @@
 # 🌾 CRM Suplidores Agrícolas
 
-CRM local para un intermediario de suplidores de productos agrícolas (sacos de
-arroz, maíz, abono y otros). Todo se guarda en una base de datos SQLite en la
-misma carpeta: no necesita internet. Para entrar hace falta un usuario y una
-contraseña (ver [Acceso y usuarios](#acceso-y-usuarios)).
+CRM para un intermediario de suplidores de productos agrícolas (sacos de
+arroz, maíz, abono y otros). Los datos se guardan en una base PostgreSQL en
+**Supabase**, así que no se pierden cuando Streamlit Cloud duerme o reinicia la
+app. Para entrar hace falta un usuario y una contraseña (ver
+[Acceso y usuarios](#acceso-y-usuarios)).
+
+## Conectar la base de datos (Supabase)
+
+1. Crea un proyecto gratis en <https://supabase.com> y guarda la contraseña de
+   la base.
+2. En el proyecto, pulsa **Connect** y copia la URI del **Session pooler**
+   (la conexión directa no funciona desde Streamlit Cloud). Se ve así:
+   `postgresql://postgres.xxxx:[YOUR-PASSWORD]@aws-0-....pooler.supabase.com:5432/postgres`.
+   Cambia `[YOUR-PASSWORD]` por tu contraseña.
+3. En Streamlit Cloud: **⋮ → Settings → Secrets** de la app, pega:
+
+   ```toml
+   DATABASE_URL = "postgresql://postgres.xxxx:TU_CONTRASEÑA@aws-0-....pooler.supabase.com:5432/postgres"
+   ```
+
+4. Para correrla en tu computadora, pon la misma línea en
+   `.streamlit/secrets.toml` (está en `.gitignore`: nunca lo subas a GitHub).
+
+Las tablas se crean solas la primera vez que abre la app.
 
 ---
 
@@ -70,9 +90,9 @@ pip install -r requirements.txt
   hora del servidor.
 - **La sesión dura mientras la pestaña esté abierta**: al recargar la página
   (F5) o cerrar el navegador hay que volver a entrar.
-- **Si se olvida la única contraseña de administrador**: con la app cerrada,
-  borra la tabla `usuarios` de `crm.db` (p. ej. con *DB Browser for SQLite*) y
-  al abrir la app pedirá crear un administrador nuevo. Los clientes y contactos
+- **Si se olvida la única contraseña de administrador**: borra las filas
+  de la tabla `usuarios` en el Table Editor de Supabase y al recargar la app
+  pedirá crear un administrador nuevo. Los clientes y contactos
   no se tocan.
 
 ### Estados
@@ -113,21 +133,30 @@ se editen; al abrirlos en el formulario aparecen con *Negociación*.
 
 ## Respaldo de los datos
 
-Todo vive en el archivo **`crm.db`** de esta carpeta. Para respaldar, copia ese
-archivo (con la aplicación cerrada). Para restaurar, ponlo de vuelta en la
-carpeta con el mismo nombre.
+Todo vive en Supabase. Puedes ver y exportar las tablas desde su
+**Table Editor**, y el plan gratuito guarda respaldos diarios. Ojo: Supabase
+pausa los proyectos gratuitos tras una semana sin uso; se reactivan desde su
+panel sin perder datos.
+
+Para pasar datos de un `crm.db` antiguo (SQLite) a Supabase, una sola vez y con
+la base vacía:
+
+```powershell
+python migrar_sqlite.py ruta\a\crm.db "postgresql://..."
+```
 
 ## Archivos
 
 ```
 crm-suplidores/
 ├─ app.py                 # Interfaz Streamlit (acceso y las 6 secciones)
-├─ database.py            # SQLite: tablas, consultas, métricas y usuarios
+├─ database.py            # PostgreSQL: tablas, consultas, métricas y usuarios
+├─ migrar_sqlite.py       # Copia un crm.db antiguo a Supabase (uso único)
 ├─ requirements.txt       # Dependencias
 ├─ assets/               # Logo de RM Group (barra lateral) e ícono de la pestaña
 ├─ .streamlit/config.toml # (opcional) ajustes de tema; sin `base` fijo para que siga el modo claro/oscuro
-├─ .venv/                 # Entorno con Streamlit y pandas ya instalados
-└─ crm.db                 # Se crea solo la primera vez que abres la app
+├─ .streamlit/secrets.toml # DATABASE_URL para correrla local (no se sube)
+└─ .venv/                 # Entorno con Streamlit y pandas ya instalados
 ```
 
 ### Estructura de la base de datos

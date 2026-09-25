@@ -75,15 +75,23 @@ st.markdown(
 
 @st.cache_resource
 def conexion():
-    return db.get_conn()
+    if "DATABASE_URL" not in st.secrets:
+        st.error(
+            "Falta `DATABASE_URL` en los Secrets de Streamlit "
+            "(o en `.streamlit/secrets.toml` si la corres en tu computadora)."
+        )
+        st.stop()
+    conn = db.get_conn(st.secrets["DATABASE_URL"])
+    db.init_db(conn)
+    return conn
 
 
 conn = conexion()
-# Fuera de la caché a propósito: la conexión cacheada sobrevive a las
-# actualizaciones del código, así que si init_db solo corriera al crearla, las
-# columnas nuevas (p. ej. `tipo`) nunca se agregarían a una base existente.
-# Es barato: solo crea lo que falta.
-db.init_db(conn)
+# La conexión cacheada queda abierta entre visitas y Supabase corta las que
+# pasan mucho tiempo inactivas: si ya no responde, se abre otra.
+if not db.conexion_viva(conn):
+    conexion.clear()
+    conn = conexion()
 
 DASHBOARD = "📊 Dashboard"
 FORMULARIO = "➕ Agregar / Editar Suplidor o Cliente"
@@ -862,7 +870,7 @@ with st.sidebar:
     if st.button("🚪 Cerrar sesión"):
         st.session_state.clear()
         st.rerun()
-    st.caption(f"Base de datos: `{db.DB_PATH.name}`")
+    st.caption("Base de datos: Supabase (PostgreSQL)")
 
 VISTAS = {
     DASHBOARD: pagina_dashboard,
