@@ -12,12 +12,22 @@ import streamlit as st
 
 import database as db
 
+# Si faltan las librerías del PDF (no se corrió `pip install -r
+# requirements.txt`), solo la sección de facturas deja de funcionar, no el CRM.
+try:
+    import factura
+except ImportError as e:
+    factura = None
+    FALTA_LIBRERIA = (e.name or "reportlab").split(".")[0]
+
 # Al actualizar el código, Streamlit vuelve a ejecutar app.py pero a veces sigue
 # usando el database.py viejo que ya tenía en memoria (así falló el despliegue
 # del seguimiento automático: "database has no attribute DIAS_SEGUIMIENTO").
 # Si el archivo cambió desde que se cargó, se vuelve a cargar.
 if getattr(db, "MTIME_CARGA", None) != Path(db.__file__).stat().st_mtime:
     db = importlib.reload(db)
+if factura and getattr(factura, "MTIME_CARGA", None) != Path(factura.__file__).stat().st_mtime:
+    factura = importlib.reload(factura)
 
 # --------------------------------------------------------------------------
 # Configuración general
@@ -90,9 +100,10 @@ FORMULARIO = "➕ Agregar / Editar Suplidor o Cliente"
 LISTA = "📋 Lista de Suplidores y Clientes"
 CONTACTOS = "🗒️ Historial de Contactos"
 SEGUIMIENTO = "🔔 Seguimiento"
+FACTURAS = "🧾 Facturas"
 USUARIOS = "👥 Usuarios"   # solo para administradores
 
-PAGINAS = [DASHBOARD, FORMULARIO, LISTA, CONTACTOS, SEGUIMIENTO]
+PAGINAS = [DASHBOARD, FORMULARIO, LISTA, CONTACTOS, SEGUIMIENTO, FACTURAS]
 
 
 def ir_a(pagina, cliente_id=None):
@@ -131,6 +142,7 @@ COLUMNAS_TABLA = {
     "nombre": "Nombre",
     "tipo": "Tipo",
     "empresa": "Empresa",
+    "cedula": "Cédula / RNC",
     "telefono": "Teléfono",
     "email": "Email",
     "ubicacion": "Ubicación",
@@ -409,6 +421,12 @@ def pagina_formulario():
             )
         with col2:
             empresa = st.text_input("Empresa", value=actual.get("empresa") or "", key="emp" + k)
+            cedula = st.text_input(
+                "Cédula / RNC",
+                value=actual.get("cedula") or "",
+                help="Aparece en las facturas.",
+                key="ced" + k,
+            )
             email = st.text_input("Email", value=actual.get("email") or "", key="mail" + k)
             tipo = st.selectbox(
                 "Tipo *",
@@ -454,6 +472,7 @@ def pagina_formulario():
             datos = {
                 "nombre": nombre.strip(),
                 "empresa": empresa.strip(),
+                "cedula": cedula.strip(),
                 "telefono": telefono.strip(),
                 "email": email.strip(),
                 "ubicacion": ubicacion.strip(),
@@ -538,11 +557,13 @@ def pagina_lista():
     st.divider()
     st.subheader("Acciones rápidas")
     cid = selector_cliente("Suplidor o cliente", clientes)
-    col6, col7 = st.columns(2)
+    col6, col7, col8 = st.columns(3)
     if col6.button("✏️ Editar este registro"):
         ir_a(FORMULARIO, cid)
     if col7.button("🗒️ Registrar un contacto"):
         ir_a(CONTACTOS, cid)
+    if col8.button("🧾 Generar factura"):
+        ir_a(FACTURAS, cid)
 
 
 # --------------------------------------------------------------------------
@@ -709,7 +730,334 @@ def pagina_seguimiento():
 
 
 # --------------------------------------------------------------------------
-# 6. Usuarios (solo administradores)
+# 6. Facturas
+# --------------------------------------------------------------------------
+
+COLUMNAS_LINEAS = ["cantidad", "descripcion", "detalle", "precio"]
+
+
+@st.cache_data(max_entries=20, show_spinner=False)
+def vista_previa(pdf):
+    return factura.paginas_png(pdf)
+
+
+def mostrar_factura(f, clave, abierta):
+    """Botón de descarga y vista previa de una factura guardada."""
+    st.download_button(
+        "⬇️ Descargar PDF",
+        data=f["pdf"],
+        file_name=f"Factura {f['numero']} - {f['cliente_nombre']}.pdf",
+        mime="application/pdf",
+        type="primary",
+        key=f"descargar_{clave}",
+    )
+    with st.expander("👁️ Vista previa", expanded=abierta):
+        for png in vista_previa(f["pdf"]):
+            st.image(png, width="stretch")
+
+
+def _texto_celda(v):
+    """Celda de texto del editor ('' si está vacía)."""
+    return "" if v is None or (isinstance(v, float) and pd.isna(v)) else str(v).strip()
+
+
+def _numero_celda(v):
+    """Celda numérica del editor (None si está vacía)."""
+    return None if v is None or pd.isna(v) else float(v)
+
+
+def lineas_editadas(df):
+    """Filas del editor -> líneas de factura; descarta las filas vacías."""
+    lineas = []
+    for fila in df.to_dict("records"):
+        linea = {
+            "cantidad": _numero_celda(fila.get("cantidad")),
+            "descripcion": _texto_celda(fila.get("descripcion")),
+            "detalle": _texto_celda(fila.get("detalle")),
+            "precio": _numero_celda(fila.get("precio")),
+        }
+        if linea["descripcion"] or linea["cantidad"] is not None or linea["precio"] is not None:
+            lineas.append(linea)
+    return lineas
+
+
+def formulario_factura():
+    clientes = db.listar_clientes(conn)
+    if not clientes:
+        st.info(f"Registra primero un suplidor o cliente en **{FORMULARIO}**.")
+        return
+
+    cid = selector_cliente("Suplidor o cliente", clientes)
+    cliente = db.obtener_cliente(conn, cid)
+    # La última factura de este cliente prellena la nueva: en un pedido que se
+    # repite solo hay que tocar lo que cambió.
+    previa = db.ultima_factura_cliente(conn, cid) or {}
+
+    # Claves con el cliente y un contador: cambiar de cliente o terminar una
+    # factura devuelve el formulario a sus valores iniciales.
+    k = f"_{cid}_{st.session_state.get('factura_gen', 0)}"
+
+    col1, col2, col3 = st.columns(3)
+    emision = col1.date_input("Fecha de emisión", value=date.today(), format="DD/MM/YYYY", key="f_emi" + k)
+    entrega = col2.date_input(
+        "Fecha de entrega", value=date.today() + timedelta(days=1), format="DD/MM/YYYY", key="f_ent" + k
+    )
+    condiciones = list(factura.CONDICIONES_PAGO)
+    anterior = previa.get("condicion_pago")
+    if anterior and anterior not in condiciones:
+        condiciones.append(anterior)
+    condicion = col3.selectbox(
+        "Condición de pago",
+        condiciones,
+        index=condiciones.index(anterior) if anterior else 0,
+        accept_new_options=True,
+        help="Elige una o escribe otra.",
+        key="f_cond" + k,
+    )
+
+    st.markdown("**Productos**")
+    if previa.get("lineas"):
+        st.caption("Vienen de la última factura de este cliente: cambia solo lo necesario.")
+    lineas_iniciales = previa.get("lineas") or [{"cantidad": None, "descripcion": "", "detalle": "", "precio": None}]
+    df_lineas = pd.DataFrame(lineas_iniciales, columns=COLUMNAS_LINEAS)
+    df_lineas[["cantidad", "precio"]] = df_lineas[["cantidad", "precio"]].astype(float)
+    editor = st.data_editor(
+        df_lineas,
+        num_rows="dynamic",
+        width="stretch",
+        hide_index=True,
+        key="f_lineas" + k,
+        column_config={
+            "cantidad": st.column_config.NumberColumn("Cantidad", min_value=0, format="localized", required=True),
+            "descripcion": st.column_config.TextColumn("Producto", required=True, width="medium"),
+            "detalle": st.column_config.TextColumn("Descripción (opcional)", width="large"),
+            "precio": st.column_config.NumberColumn(
+                "Precio unitario (RD$)", min_value=0, format="%.2f", required=True
+            ),
+        },
+    )
+    lineas = lineas_editadas(editor)
+
+    transporte = st.number_input(
+        "Transporte / flete (RD$)",
+        min_value=0.0,
+        step=100.0,
+        value=float(previa.get("transporte") or 0),
+        format="%.2f",
+        help="Si es mayor que 0, se agrega la línea «Servicio de transporte / flete» y aparece en los "
+             "totales. Déjalo en 0 si no aplica.",
+        key="f_transp" + k,
+    )
+
+    # Datos del cliente: salen de su ficha; el segundo contacto, de su última
+    # factura. Rara vez hay que tocarlos, por eso van plegados.
+    personas_previas = (previa.get("cliente") or {}).get("personas") or []
+    cedula = cliente.get("cedula") or ""
+    if not cedula and personas_previas and personas_previas[0].get("nombre") == cliente["nombre"]:
+        cedula = personas_previas[0].get("cedula") or ""
+    segunda = personas_previas[1] if len(personas_previas) > 1 else {}
+
+    with st.expander("👤 Datos del cliente en la factura", expanded=not cedula):
+        st.caption(
+            f"Salen de la ficha en **{FORMULARIO}**. Si agregas aquí la cédula del contacto "
+            "principal, queda guardada en su ficha para las próximas facturas."
+        )
+        nombre_factura = st.text_input(
+            "Nombre en la factura", value=cliente["empresa"] or cliente["nombre"], key="f_nom" + k
+        )
+        c1, c2, c3 = st.columns(3)
+        p1_nombre = c1.text_input("Contacto", value=cliente["nombre"], key="f_p1n" + k)
+        p1_cedula = c2.text_input("Cédula / RNC", value=cedula, key="f_p1c" + k)
+        p1_tel = c3.text_input("Teléfono", value=cliente["telefono"] or "", key="f_p1t" + k)
+        c4, c5, c6 = st.columns(3)
+        p2_nombre = c4.text_input("Segundo contacto (opcional)", value=segunda.get("nombre", ""), key="f_p2n" + k)
+        p2_cedula = c5.text_input("Cédula / RNC", value=segunda.get("cedula", ""), key="f_p2c" + k)
+        p2_tel = c6.text_input("Teléfono", value=segunda.get("telefono", ""), key="f_p2t" + k)
+        ubicacion = st.text_input("Ubicación", value=cliente["ubicacion"] or "", key="f_ubi" + k)
+
+    completas = [l for l in lineas if l["descripcion"] and l["cantidad"] and l["precio"] is not None]
+    subtotal, total = factura.totales(completas, transporte)
+
+    st.divider()
+    m1, m2, m3 = st.columns(3)
+    m1.metric("Subtotal", f"RD$ {factura.monto(subtotal)}")
+    m2.metric("Transporte / flete", f"RD$ {factura.monto(transporte)}")
+    m3.metric("Total", f"RD$ {factura.monto(total)}")
+
+    numero = db.siguiente_numero(conn, emision.year)
+    if not st.button(f"🧾 Generar factura {numero}", type="primary", key="f_generar" + k):
+        return
+
+    if not lineas:
+        st.error("Agrega al menos un producto.")
+        return
+    if len(completas) < len(lineas):
+        st.error("Cada producto necesita nombre, cantidad mayor que 0 y precio.")
+        return
+    if entrega < emision:
+        st.error("La fecha de entrega no puede ser anterior a la de emisión.")
+        return
+    if not nombre_factura.strip():
+        st.error("El nombre en la factura es obligatorio.")
+        return
+
+    personas = [
+        {"nombre": n.strip(), "cedula": c.strip(), "telefono": t.strip()}
+        for n, c, t in ((p1_nombre, p1_cedula, p1_tel), (p2_nombre, p2_cedula, p2_tel))
+        if n.strip() or c.strip() or t.strip()
+    ]
+    datos = {
+        "cliente_id": cid,
+        "fecha_emision": emision.isoformat(),
+        "fecha_entrega": entrega.isoformat(),
+        "condicion_pago": (condicion or factura.CONDICIONES_PAGO[0]).strip(),
+        "cliente": {"nombre": nombre_factura.strip(), "personas": personas, "ubicacion": ubicacion.strip()},
+        "lineas": completas,
+        "transporte": round(transporte, 2),
+        "subtotal": subtotal,
+        "total": total,
+    }
+    fid = db.crear_factura(conn, datos, factura.generar_pdf, sesion["usuario"])
+
+    if p1_cedula.strip() and not cliente.get("cedula") and p1_nombre.strip() == cliente["nombre"]:
+        db.guardar_cedula(conn, cid, p1_cedula.strip())
+
+    st.session_state["factura_generada"] = fid
+    st.session_state["factura_gen"] = st.session_state.get("factura_gen", 0) + 1
+    st.rerun()
+
+
+def facturas_emitidas():
+    facturas = db.listar_facturas(conn)
+    if not facturas:
+        st.info("Todavía no se ha emitido ninguna factura.")
+        return
+
+    st.dataframe(
+        pd.DataFrame(
+            [
+                {
+                    "Número": f["numero"],
+                    "Emisión": fecha_dmy(f["fecha_emision"]),
+                    "Cliente": f["cliente_nombre"],
+                    "Total (RD$)": f["total"],
+                    "Generada por": f["creado_por"] or "",
+                }
+                for f in facturas
+            ]
+        ),
+        column_config={"Total (RD$)": st.column_config.NumberColumn(format="%.2f")},
+        width="stretch",
+        hide_index=True,
+    )
+
+    por_id = {f["id"]: f for f in facturas}
+    fid = st.selectbox(
+        "Factura",
+        list(por_id),
+        format_func=lambda i: f"{por_id[i]['numero']} — {por_id[i]['cliente_nombre']}",
+        key="f_emitida",
+    )
+    f = db.obtener_factura(conn, fid)
+    mostrar_factura(f, f"emitida_{fid}", abierta=False)
+
+    # Solo la última de su año: borrar una intermedia dejaría un hueco en la
+    # numeración.
+    if sesion["rol"] != db.ADMIN or not db.es_ultima_del_anio(conn, fid):
+        return
+    st.caption(
+        f"Es la última factura de {f['anio']}. Si se generó por error, al eliminarla el "
+        f"número **{f['numero']}** queda libre para la próxima."
+    )
+    col1, col2 = st.columns([1, 2])
+    confirmar = col2.checkbox("Confirmo que quiero eliminar esta factura", key=f"f_del_{fid}")
+    if col1.button("🗑️ Eliminar factura", disabled=not confirmar, key=f"f_borrar_{fid}"):
+        db.eliminar_factura(conn, fid)
+        if st.session_state.get("factura_generada") == fid:
+            st.session_state.pop("factura_generada")
+        avisar(f"Factura **{f['numero']}** eliminada.", "warning")
+        st.rerun()
+
+
+def numeracion_facturas():
+    """Solo administradores: fijar a mano el número de la próxima factura."""
+    st.caption(
+        "Normalmente no hace falta: cada factura toma el número siguiente al último. "
+        "Úsalo si una factura se hizo fuera del sistema o si hay que saltar o repetir un número."
+    )
+    anio = st.number_input("Año", min_value=2000, max_value=2100, value=date.today().year, step=1)
+    anio = int(anio)
+    fijada = db.secuencia_fijada(conn, anio)
+    siguiente = db.siguiente_secuencia(conn, anio)
+
+    st.markdown(f"Próxima factura de {anio}: **{db.numero_factura(anio, siguiente)}**")
+    ultima = db.ultima_secuencia(conn, anio)
+    st.caption(
+        f"Última usada: {db.numero_factura(anio, ultima) if ultima else 'ninguna'}"
+        + (" · Número fijado a mano." if fijada == siguiente else "")
+    )
+
+    with st.form("form_numeracion"):
+        nuevo = st.number_input(
+            "Número de la próxima factura", min_value=1, max_value=9999, value=siguiente, step=1,
+            help="Solo la parte final: 2 para RMG-AÑO-0002. Después de usarlo, la numeración "
+                 "sigue sola desde la última factura.",
+        )
+        guardar = st.form_submit_button("💾 Guardar numeración", type="primary")
+
+    if guardar:
+        if error := db.fijar_siguiente_secuencia(conn, anio, int(nuevo)):
+            st.error(error)
+        else:
+            avisar(f"La próxima factura de {anio} será **{db.numero_factura(anio, int(nuevo))}**.")
+            st.rerun()
+
+    if fijada is not None and st.button("↩️ Volver a la numeración automática"):
+        db.quitar_secuencia_fijada(conn, anio)
+        avisar(f"Numeración automática: la próxima de {anio} será "
+               f"**{db.numero_factura(anio, db.siguiente_secuencia(conn, anio))}**.", "info")
+        st.rerun()
+
+
+def pagina_facturas():
+    st.title(FACTURAS)
+    st.caption("Genera la factura de un suplidor o cliente con los datos ya guardados y descárgala en PDF.")
+    mostrar_aviso()
+
+    if factura is None:
+        st.error(
+            f"Falta instalar la librería **{FALTA_LIBRERIA}**, que se usa para crear el PDF. "
+            "En la terminal, con el entorno activado, ejecuta `pip install -r requirements.txt` "
+            "y vuelve a abrir la aplicación."
+        )
+        return
+
+    generada = st.session_state.get("factura_generada")
+    f = db.obtener_factura(conn, generada) if generada else None
+    if f:
+        with st.container(border=True):
+            st.subheader(f"✅ Factura {f['numero']} generada")
+            st.caption(f"{f['cliente_nombre']} · Total RD$ {factura.monto(f['total'])}")
+            mostrar_factura(f, f"nueva_{f['id']}", abierta=True)
+            if st.button("Cerrar", key="cerrar_generada"):
+                st.session_state.pop("factura_generada")
+                st.rerun()
+
+    es_admin = sesion["rol"] == db.ADMIN
+    pestanas = st.tabs(
+        ["🆕 Nueva factura", "📚 Facturas emitidas"] + (["🔢 Numeración"] if es_admin else [])
+    )
+    with pestanas[0]:
+        formulario_factura()
+    with pestanas[1]:
+        facturas_emitidas()
+    if es_admin:
+        with pestanas[2]:
+            numeracion_facturas()
+
+
+# --------------------------------------------------------------------------
+# 7. Usuarios (solo administradores)
 # --------------------------------------------------------------------------
 
 def pagina_usuarios():
@@ -870,6 +1218,7 @@ VISTAS = {
     LISTA: pagina_lista,
     CONTACTOS: pagina_contactos,
     SEGUIMIENTO: pagina_seguimiento,
+    FACTURAS: pagina_facturas,
     USUARIOS: pagina_usuarios,
 }
 

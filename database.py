@@ -7,6 +7,7 @@ acceso de cada usuario lleva además la hora: 'YYYY-MM-DD HH:MM').
 
 import hashlib
 import hmac
+import json
 import secrets
 import sqlite3
 from datetime import date, datetime, timedelta
@@ -113,6 +114,35 @@ def init_db(conn):
             fecha_creacion  TEXT NOT NULL,
             ultimo_acceso   TEXT
         );
+
+        -- `datos` guarda en JSON todo lo que lleva la factura (cliente,
+        -- personas, líneas...) tal como se emitió, y `pdf` el archivo: aunque
+        -- después cambie la ficha del cliente, la factura se descarga igual.
+        CREATE TABLE IF NOT EXISTS facturas (
+            id             INTEGER PRIMARY KEY AUTOINCREMENT,
+            numero         TEXT NOT NULL UNIQUE,
+            anio           INTEGER NOT NULL,
+            secuencia      INTEGER NOT NULL,
+            cliente_id     INTEGER REFERENCES clientes (id) ON DELETE SET NULL,
+            cliente_nombre TEXT NOT NULL,
+            fecha_emision  TEXT NOT NULL,
+            total          REAL NOT NULL,
+            datos          TEXT NOT NULL,
+            pdf            BLOB NOT NULL,
+            creado_por     TEXT,
+            fecha_creacion TEXT NOT NULL,
+            UNIQUE (anio, secuencia)
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_facturas_cliente
+            ON facturas (cliente_id, id DESC);
+
+        -- Ajustes que cambia un administrador (p. ej. el próximo número de
+        -- factura fijado a mano).
+        CREATE TABLE IF NOT EXISTS configuracion (
+            clave TEXT PRIMARY KEY,
+            valor TEXT NOT NULL
+        );
         """
     )
 
@@ -121,6 +151,9 @@ def init_db(conn):
     columnas = {r["name"] for r in conn.execute("PRAGMA table_info(clientes)")}
     if "tipo" not in columnas:
         conn.execute("ALTER TABLE clientes ADD COLUMN tipo TEXT NOT NULL DEFAULT 'Cliente'")
+    # La cédula (o RNC) aparece en la factura.
+    if "cedula" not in columnas:
+        conn.execute("ALTER TABLE clientes ADD COLUMN cedula TEXT")
 
     # El seguimiento ya no se fija a mano: los registros que quedaron sin fecha
     # reciben la calculada.
@@ -139,9 +172,9 @@ def init_db(conn):
 def crear_cliente(conn, datos):
     cur = conn.execute(
         """
-        INSERT INTO clientes (nombre, empresa, telefono, email, ubicacion,
+        INSERT INTO clientes (nombre, empresa, telefono, email, ubicacion, cedula,
                               productos_interes, estado, tipo, fecha_creacion)
-        VALUES (:nombre, :empresa, :telefono, :email, :ubicacion,
+        VALUES (:nombre, :empresa, :telefono, :email, :ubicacion, :cedula,
                 :productos_interes, :estado, :tipo, :fecha_creacion)
         """,
         {**datos, "fecha_creacion": date.today().isoformat()},
@@ -161,7 +194,7 @@ def actualizar_cliente(conn, cliente_id, datos):
         """
         UPDATE clientes
            SET nombre = :nombre, empresa = :empresa, telefono = :telefono,
-               email = :email, ubicacion = :ubicacion,
+               email = :email, ubicacion = :ubicacion, cedula = :cedula,
                productos_interes = :productos_interes, estado = :estado,
                tipo = :tipo
          WHERE id = :id
@@ -381,6 +414,186 @@ def metricas(conn):
         "por_estado": por_estado,
         "activos": activos,
     }
+
+
+# --------------------------------------------------------------------------
+# Facturas
+# --------------------------------------------------------------------------
+
+PREFIJO_FACTURA = "RMG"
+
+# Facturas hechas fuera del sistema antes de empezar a usarlo: la numeración de
+# ese año sigue después de la última. RMG-2026-0001 se hizo y se envió a mano.
+ULTIMA_FUERA_DEL_SISTEMA = {2026: 1}
+
+
+def numero_factura(anio, secuencia):
+    """(2026, 2) -> 'RMG-2026-0002'."""
+    return f"{PREFIJO_FACTURA}-{anio}-{secuencia:04d}"
+
+
+def _clave_numeracion(anio):
+    return f"proxima_factura_{anio}"
+
+
+def _secuencia_usada(conn, anio, secuencia):
+    return conn.execute(
+        "SELECT 1 FROM facturas WHERE anio = ? AND secuencia = ?", (anio, secuencia)
+    ).fetchone() is not None
+
+
+def secuencia_fijada(conn, anio):
+    """Próximo número fijado a mano por un administrador, o None."""
+    row = conn.execute(
+        "SELECT valor FROM configuracion WHERE clave = ?", (_clave_numeracion(anio),)
+    ).fetchone()
+    return int(row["valor"]) if row else None
+
+
+def ultima_secuencia(conn, anio):
+    """Último número usado en el año, contando los emitidos fuera del sistema."""
+    row = conn.execute("SELECT MAX(secuencia) FROM facturas WHERE anio = ?", (anio,)).fetchone()
+    return max(row[0] or 0, ULTIMA_FUERA_DEL_SISTEMA.get(anio, 0))
+
+
+def siguiente_secuencia(conn, anio):
+    """El número fijado a mano si hay uno libre; si no, el siguiente al último.
+    La numeración vuelve a 0001 cada año."""
+    fijada = secuencia_fijada(conn, anio)
+    if fijada is not None and not _secuencia_usada(conn, anio, fijada):
+        return fijada
+    return ultima_secuencia(conn, anio) + 1
+
+
+def fijar_siguiente_secuencia(conn, anio, secuencia):
+    """Fija el número de la próxima factura del año. Devuelve un mensaje de
+    error, o None si quedó guardado."""
+    if secuencia < 1:
+        return "El número debe ser 1 o mayor."
+    if _secuencia_usada(conn, anio, secuencia):
+        return f"La factura {numero_factura(anio, secuencia)} ya existe."
+    conn.execute(
+        """
+        INSERT INTO configuracion (clave, valor) VALUES (?, ?)
+        ON CONFLICT (clave) DO UPDATE SET valor = excluded.valor
+        """,
+        (_clave_numeracion(anio), str(secuencia)),
+    )
+    conn.commit()
+    return None
+
+
+def quitar_secuencia_fijada(conn, anio):
+    """Vuelve a la numeración automática (el siguiente al último)."""
+    conn.execute("DELETE FROM configuracion WHERE clave = ?", (_clave_numeracion(anio),))
+    conn.commit()
+
+
+def siguiente_numero(conn, anio):
+    return numero_factura(anio, siguiente_secuencia(conn, anio))
+
+
+def crear_factura(conn, datos, generar_pdf, usuario=None):
+    """Asigna el número siguiente, genera el PDF con él y guarda la factura.
+
+    `datos` es el diccionario de la factura sin número; `generar_pdf` recibe
+    ese diccionario ya numerado y devuelve los bytes del PDF. Si dos personas
+    generan a la vez y chocan en el número, se reintenta con el siguiente.
+    Devuelve el id de la factura.
+    """
+    anio = date.fromisoformat(datos["fecha_emision"]).year
+    for _ in range(5):
+        secuencia = siguiente_secuencia(conn, anio)
+        numerada = {**datos, "numero": numero_factura(anio, secuencia)}
+        pdf = generar_pdf(numerada)
+        try:
+            cur = conn.execute(
+                """
+                INSERT INTO facturas (numero, anio, secuencia, cliente_id, cliente_nombre,
+                                      fecha_emision, total, datos, pdf, creado_por,
+                                      fecha_creacion)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    numerada["numero"], anio, secuencia, numerada.get("cliente_id"),
+                    numerada["cliente"]["nombre"], numerada["fecha_emision"],
+                    numerada["total"], json.dumps(numerada, ensure_ascii=False), pdf,
+                    usuario, datetime.now().strftime("%Y-%m-%d %H:%M"),
+                ),
+            )
+        except sqlite3.IntegrityError:
+            conn.rollback()
+            continue
+        # El número fijado a mano ya se usó: las siguientes vuelven a ser
+        # automáticas.
+        if secuencia_fijada(conn, anio) == secuencia:
+            conn.execute("DELETE FROM configuracion WHERE clave = ?", (_clave_numeracion(anio),))
+        conn.commit()
+        return cur.lastrowid
+    raise RuntimeError("No se pudo asignar un número de factura. Inténtalo de nuevo.")
+
+
+def listar_facturas(conn, cliente_id=None):
+    """Facturas sin el PDF, de la más reciente a la más antigua."""
+    sql = """
+        SELECT id, numero, anio, secuencia, cliente_id, cliente_nombre,
+               fecha_emision, total, creado_por, fecha_creacion
+          FROM facturas
+    """
+    params = ()
+    if cliente_id is not None:
+        sql += " WHERE cliente_id = ?"
+        params = (cliente_id,)
+    sql += " ORDER BY anio DESC, secuencia DESC"
+    return [dict(r) for r in conn.execute(sql, params).fetchall()]
+
+
+def obtener_factura(conn, factura_id):
+    """La factura con su PDF y sus datos ya convertidos a diccionario."""
+    row = conn.execute("SELECT * FROM facturas WHERE id = ?", (factura_id,)).fetchone()
+    if not row:
+        return None
+    factura = dict(row)
+    factura["datos"] = json.loads(factura["datos"])
+    return factura
+
+
+def ultima_factura_cliente(conn, cliente_id):
+    """Datos de la factura más reciente del cliente (para prellenar la
+    siguiente), o None si nunca se le ha facturado."""
+    row = conn.execute(
+        "SELECT datos FROM facturas WHERE cliente_id = ? ORDER BY id DESC LIMIT 1",
+        (cliente_id,),
+    ).fetchone()
+    return json.loads(row["datos"]) if row else None
+
+
+def es_ultima_del_anio(conn, factura_id):
+    """Solo la última factura de su año se puede eliminar: así la numeración
+    queda seguida y la siguiente reutiliza ese número."""
+    row = conn.execute(
+        """
+        SELECT f.secuencia = (SELECT MAX(secuencia) FROM facturas WHERE anio = f.anio)
+          FROM facturas f
+         WHERE f.id = ?
+        """,
+        (factura_id,),
+    ).fetchone()
+    return bool(row and row[0])
+
+
+def eliminar_factura(conn, factura_id):
+    """Devuelve False (sin borrar nada) si no es la última de su año."""
+    if not es_ultima_del_anio(conn, factura_id):
+        return False
+    conn.execute("DELETE FROM facturas WHERE id = ?", (factura_id,))
+    conn.commit()
+    return True
+
+
+def guardar_cedula(conn, cliente_id, cedula):
+    conn.execute("UPDATE clientes SET cedula = ? WHERE id = ?", (cedula, cliente_id))
+    conn.commit()
 
 
 # --------------------------------------------------------------------------

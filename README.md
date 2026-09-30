@@ -18,6 +18,9 @@ cd "C:\Users\esaco\OneDrive\Documents\Coding\crm-suplidores"
 streamlit run app.py
 ```
 
+> **Después de actualizar a la versión con facturas**, instala una vez las
+> dependencias nuevas (con el entorno activado): `pip install -r requirements.txt`
+
 Se abre solo en el navegador (`http://localhost:8501`). Para cerrarlo, pulsa
 `Ctrl + C` en la terminal.
 
@@ -47,6 +50,7 @@ pip install -r requirements.txt
 | **📋 Lista de Suplidores y Clientes** | Búsqueda por nombre, empresa, ubicación o productos; filtro por tipo (clientes, suplidores o ambos) y por estado; exportación a CSV. |
 | **🗒️ Historial de Contactos** | Bitácora por cliente: fecha, tipo (llamada, email, reunión, WhatsApp, visita), notas y resultado. |
 | **🔔 Seguimiento** | Seguimientos vencidos, los de hoy y los próximos; botón para posponer los días que elijas. |
+| **🧾 Facturas** | Genera la factura de un suplidor o cliente con el diseño de RM Group, numerada sola (`RMG-2026-0001`, `0002`…), y la descarga en PDF. Guarda todas las emitidas. |
 | **👥 Usuarios** | Solo administradores: dar acceso, cambiar rol, desactivar, restablecer contraseñas y ver el último acceso de cada uno. |
 
 ---
@@ -111,6 +115,38 @@ se editen; al abrirlos en el formulario aparecen con *Negociación*.
 - **Eliminar un cliente** borra también todo su historial de contactos. Por eso
   hay que marcar la casilla de confirmación antes de que el botón se active.
 
+## Facturas
+
+En **🧾 Facturas** (o con el botón *🧾 Generar factura* de la lista) eliges el
+suplidor o cliente y la factura sale con sus datos ya puestos. Lo único que se
+llena es lo que cambia en cada venta:
+
+| Dato | De dónde sale |
+|---|---|
+| Número | Automático: el siguiente al último (`RMG-2026-0002`, `0003`…). Vuelve a `0001` cada año. |
+| Cliente (nombre, contacto, cédula, teléfono, ubicación) | De su ficha. El segundo contacto, de su última factura. |
+| Fecha de emisión / entrega | Hoy y mañana; se pueden cambiar. |
+| Condición de pago | *Al contado* o la de su última factura; se puede escribir otra. |
+| Productos (cantidad, producto, descripción, precio) | Los de su última factura, para editarlos. |
+| Transporte / flete | El de su última factura. Si es mayor que 0 agrega la línea de transporte y el renglón en los totales. |
+
+Lo fijo (datos de RM Group, cuenta bancaria, firmas, lemas) está al principio
+de `factura.py`: si cambia la cuenta o el teléfono, se edita ahí.
+
+- Tras generarla aparecen **⬇️ Descargar PDF** y la vista previa. En *📚 Facturas
+  emitidas* se vuelve a descargar cualquiera: cada factura guarda su PDF tal
+  como salió.
+- Si la tabla de productos no cabe en una página, sigue en la siguiente.
+- **Eliminar**: solo un administrador, y solo la última factura del año, para
+  que la numeración quede seguida (ese número se reutiliza en la próxima).
+- **Numeración**: la `RMG-2026-0001` se hizo a mano, así que el sistema empieza
+  en la `0002` (se indica en `ULTIMA_FUERA_DEL_SISTEMA`, en `database.py`). Un
+  administrador puede fijar el número de la próxima factura en la pestaña
+  *🔢 Numeración*; después de usarlo, la numeración sigue sola desde la última.
+  No acepta un número que ya exista.
+- La cédula del contacto se agrega en la ficha (*Cédula / RNC*) o al hacer la
+  factura; en ese caso queda guardada en la ficha.
+
 ## Respaldo de los datos
 
 Todo vive en el archivo **`crm.db`** de esta carpeta. Para respaldar, copia ese
@@ -122,9 +158,10 @@ carpeta con el mismo nombre.
 ```
 crm-suplidores/
 ├─ app.py                 # Interfaz Streamlit (acceso y las 6 secciones)
-├─ database.py            # SQLite: tablas, consultas, métricas y usuarios
+├─ database.py            # SQLite: tablas, consultas, métricas, usuarios y facturas
+├─ factura.py             # Diseño de la factura en PDF y datos fijos de la empresa
 ├─ requirements.txt       # Dependencias
-├─ assets/               # Logo de RM Group (barra lateral) e ícono de la pestaña
+├─ assets/               # Logos, ícono de la pestaña y fuentes de la factura (licencia OFL)
 ├─ .streamlit/config.toml # (opcional) ajustes de tema; sin `base` fijo para que siga el modo claro/oscuro
 ├─ .venv/                 # Entorno con Streamlit y pandas ya instalados
 └─ crm.db                 # Se crea solo la primera vez que abres la app
@@ -133,7 +170,7 @@ crm-suplidores/
 ### Estructura de la base de datos
 
 **`clientes`** — `id`, `nombre`, `tipo` (`Cliente` o `Suplidor`), `empresa`,
-`telefono`, `email`, `ubicacion`, `productos_interes` (texto libre), `estado`,
+`cedula`, `telefono`, `email`, `ubicacion`, `productos_interes` (texto libre), `estado`,
 `fecha_creacion`, `proximo_seguimiento`, `giro_negocio` (ya no se usa; se
 conserva para no perder datos anteriores)
 
@@ -143,9 +180,16 @@ abre la app; los registros anteriores quedan como `Cliente`.
 **`contactos`** — `id`, `cliente_id`, `fecha`, `tipo_contacto`, `notas`,
 `resultado`
 
+**`facturas`** — `id`, `numero` (único), `anio`, `secuencia`, `cliente_id`,
+`cliente_nombre`, `fecha_emision`, `total`, `datos` (JSON con todo lo que lleva
+la factura), `pdf` (el archivo), `creado_por`, `fecha_creacion`
+
 **`usuarios`** — `id`, `usuario` (único, sin distinguir mayúsculas), `nombre`,
 `contrasena_hash`, `rol` (`Administrador` o `Usuario`), `activo` (1/0),
 `fecha_creacion`, `ultimo_acceso` (`AAAA-MM-DD HH:MM`)
+
+**`configuracion`** — `clave`, `valor` (p. ej. el próximo número de factura fijado
+a mano: `proxima_factura_2026`)
 
 Las fechas se guardan como texto `AAAA-MM-DD`. Al borrar un cliente, sus
 contactos se eliminan en cascada.
