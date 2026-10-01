@@ -1,9 +1,29 @@
 # 🌾 CRM Suplidores Agrícolas
 
-CRM local para un intermediario de suplidores de productos agrícolas (sacos de
-arroz, maíz, abono y otros). Todo se guarda en una base de datos SQLite en la
-misma carpeta: no necesita internet. Para entrar hace falta un usuario y una
-contraseña (ver [Acceso y usuarios](#acceso-y-usuarios)).
+CRM para un intermediario de suplidores de productos agrícolas (sacos de
+arroz, maíz, abono y otros). Los datos se guardan en una base PostgreSQL en
+**Supabase**, así que no se pierden cuando Streamlit Cloud duerme o reinicia la
+app. Para entrar hace falta un usuario y una contraseña (ver
+[Acceso y usuarios](#acceso-y-usuarios)).
+
+## Conectar la base de datos (Supabase)
+
+1. Crea un proyecto gratis en <https://supabase.com> y guarda la contraseña de
+   la base.
+2. En el proyecto, pulsa **Connect** y copia la URI del **Session pooler**
+   (la conexión directa no funciona desde Streamlit Cloud). Se ve así:
+   `postgresql://postgres.xxxx:[YOUR-PASSWORD]@aws-0-....pooler.supabase.com:5432/postgres`.
+   Cambia `[YOUR-PASSWORD]` por tu contraseña.
+3. En Streamlit Cloud: **⋮ → Settings → Secrets** de la app, pega:
+
+   ```toml
+   DATABASE_URL = "postgresql://postgres.xxxx:TU_CONTRASEÑA@aws-0-....pooler.supabase.com:5432/postgres"
+   ```
+
+4. Para correrla en tu computadora, pon la misma línea en
+   `.streamlit/secrets.toml` (está en `.gitignore`: nunca lo subas a GitHub).
+
+Las tablas se crean solas la primera vez que abre la app.
 
 ---
 
@@ -19,7 +39,8 @@ streamlit run app.py
 ```
 
 > **Después de actualizar a la versión con facturas**, instala una vez las
-> dependencias nuevas (con el entorno activado): `pip install -r requirements.txt`
+> dependencias nuevas (con el entorno activado): `pip install -r requirements.txt`.
+> En Streamlit Cloud no hace falta: las instala solo al actualizarse.
 
 Se abre solo en el navegador (`http://localhost:8501`). Para cerrarlo, pulsa
 `Ctrl + C` en la terminal.
@@ -52,6 +73,7 @@ pip install -r requirements.txt
 | **🔔 Seguimiento** | Seguimientos vencidos, los de hoy y los próximos; botón para posponer los días que elijas. |
 | **🧾 Facturas** | Genera la factura de un suplidor o cliente con el diseño de RM Group, numerada sola (`RMG-2026-0001`, `0002`…), y la descarga en PDF. Guarda todas las emitidas. |
 | **👥 Usuarios** | Solo administradores: dar acceso, cambiar rol, desactivar, restablecer contraseñas y ver el último acceso de cada uno. |
+| **📜 Actividad** | Solo administradores: quién hizo qué y cuándo (altas, ediciones, contactos, asignaciones…). |
 
 ---
 
@@ -60,8 +82,19 @@ pip install -r requirements.txt
 - **Primera vez**: si la base no tiene usuarios, la app pide crear la cuenta de
   **administrador** antes de mostrar nada. Hazlo en cuanto abras la app (sobre
   todo si está publicada en internet: quien llegue primero crea esa cuenta).
-- **Roles**: *Administrador* ve todo, incluida **👥 Usuarios**. *Usuario* ve
-  todas las secciones del CRM excepto esa.
+- **Roles**: *Administrador* ve todo, incluidas **👥 Usuarios** y
+  **📜 Actividad**. *Usuario* ve todas las secciones del CRM excepto esas dos.
+- **Asignación**: cada suplidor o cliente puede tener un usuario responsable.
+  Todos ven todos los registros, pero los asignados a ti llevan ⭐, la lista se
+  filtra por *Asignado a* y en *Seguimiento* los usuarios ven primero solo los
+  suyos. Lo que registra un usuario queda asignado a él; solo el administrador
+  cambia la asignación (en el formulario de edición, o varios a la vez al final
+  de la *Lista*).
+- **Actividad**: cada inicio de sesión, alta, edición (con qué cambió),
+  eliminación, contacto, seguimiento pospuesto, asignación, factura (generada,
+  eliminada o cambio de numeración) y cambio de usuarios
+  queda anotado con quién lo hizo y cuándo. Se filtra por fechas, usuario y
+  acción, y se exporta a CSV.
 - **Quitar el acceso**: desmarca *Cuenta activa* (conserva la cuenta) o elimina
   el usuario. Si esa persona tenía la sesión abierta, se cierra en su siguiente
   clic. Un administrador no puede desactivarse, eliminarse ni quitarse el rol a
@@ -74,9 +107,9 @@ pip install -r requirements.txt
   hora del servidor.
 - **La sesión dura mientras la pestaña esté abierta**: al recargar la página
   (F5) o cerrar el navegador hay que volver a entrar.
-- **Si se olvida la única contraseña de administrador**: con la app cerrada,
-  borra la tabla `usuarios` de `crm.db` (p. ej. con *DB Browser for SQLite*) y
-  al abrir la app pedirá crear un administrador nuevo. Los clientes y contactos
+- **Si se olvida la única contraseña de administrador**: borra las filas
+  de la tabla `usuarios` en el Table Editor de Supabase y al recargar la app
+  pedirá crear un administrador nuevo. Los clientes y contactos
   no se tocan.
 
 ### Estados
@@ -149,33 +182,40 @@ de `factura.py`: si cambia la cuenta o el teléfono, se edita ahí.
 
 ## Respaldo de los datos
 
-Todo vive en el archivo **`crm.db`** de esta carpeta. Para respaldar, copia ese
-archivo (con la aplicación cerrada). Para restaurar, ponlo de vuelta en la
-carpeta con el mismo nombre.
+Todo vive en Supabase. Puedes ver y exportar las tablas desde su
+**Table Editor**, y el plan gratuito guarda respaldos diarios. Ojo: Supabase
+pausa los proyectos gratuitos tras una semana sin uso; se reactivan desde su
+panel sin perder datos.
+
+Para pasar datos de un `crm.db` antiguo (SQLite) a Supabase, una sola vez y con
+la base vacía:
+
+```powershell
+python migrar_sqlite.py ruta\a\crm.db "postgresql://..."
+```
 
 ## Archivos
 
 ```
 crm-suplidores/
-├─ app.py                 # Interfaz Streamlit (acceso y las 6 secciones)
-├─ database.py            # SQLite: tablas, consultas, métricas, usuarios y facturas
+├─ app.py                 # Interfaz Streamlit (acceso y las 8 secciones)
+├─ database.py            # PostgreSQL: tablas, consultas, métricas, usuarios y facturas
 ├─ factura.py             # Diseño de la factura en PDF y datos fijos de la empresa
+├─ migrar_sqlite.py       # Copia un crm.db antiguo a Supabase (uso único)
 ├─ requirements.txt       # Dependencias
 ├─ assets/               # Logos, ícono de la pestaña y fuentes de la factura (licencia OFL)
 ├─ .streamlit/config.toml # (opcional) ajustes de tema; sin `base` fijo para que siga el modo claro/oscuro
-├─ .venv/                 # Entorno con Streamlit y pandas ya instalados
-└─ crm.db                 # Se crea solo la primera vez que abres la app
+├─ .streamlit/secrets.toml # DATABASE_URL para correrla local (no se sube)
+└─ .venv/                 # Entorno con Streamlit y pandas ya instalados
 ```
 
 ### Estructura de la base de datos
 
 **`clientes`** — `id`, `nombre`, `tipo` (`Cliente` o `Suplidor`), `empresa`,
 `cedula`, `telefono`, `email`, `ubicacion`, `productos_interes` (texto libre), `estado`,
-`fecha_creacion`, `proximo_seguimiento`, `giro_negocio` (ya no se usa; se
-conserva para no perder datos anteriores)
-
-La columna `tipo` se agrega sola a una base existente la primera vez que se
-abre la app; los registros anteriores quedan como `Cliente`.
+`fecha_creacion`, `proximo_seguimiento`, `asignado_a` (id del usuario
+responsable; queda vacío si ese usuario se elimina), `giro_negocio` (ya no se
+usa; se conserva para no perder datos anteriores)
 
 **`contactos`** — `id`, `cliente_id`, `fecha`, `tipo_contacto`, `notas`,
 `resultado`
@@ -190,6 +230,11 @@ la factura), `pdf` (el archivo), `creado_por`, `fecha_creacion`
 
 **`configuracion`** — `clave`, `valor` (p. ej. el próximo número de factura fijado
 a mano: `proxima_factura_2026`)
+
+**`actividad`** — `id`, `fecha` (`AAAA-MM-DD HH:MM:SS`, hora de República
+Dominicana), `usuario_id`, `usuario_nombre`, `accion`, `detalle`. Los nombres se
+guardan como texto para que el historial siga legible aunque luego se elimine
+el usuario o el registro.
 
 Las fechas se guardan como texto `AAAA-MM-DD`. Al borrar un cliente, sus
 contactos se eliminan en cascada.

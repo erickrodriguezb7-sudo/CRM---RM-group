@@ -85,15 +85,30 @@ st.markdown(
 
 @st.cache_resource
 def conexion():
-    return db.get_conn()
+    if "DATABASE_URL" not in st.secrets:
+        st.error(
+            "Falta `DATABASE_URL` en los Secrets de Streamlit "
+            "(o en `.streamlit/secrets.toml` si la corres en tu computadora)."
+        )
+        st.stop()
+    return db.get_conn(st.secrets["DATABASE_URL"])
+
+
+@st.cache_resource
+def preparar_esquema(_conn, version):
+    """Crea o actualiza las tablas una vez por versión del esquema. La
+    conexión cacheada sobrevive a las actualizaciones del código, así que
+    atarlo a ella dejaría sin crear las tablas y columnas nuevas."""
+    db.init_db(_conn)
 
 
 conn = conexion()
-# Fuera de la caché a propósito: la conexión cacheada sobrevive a las
-# actualizaciones del código, así que si init_db solo corriera al crearla, las
-# columnas nuevas (p. ej. `tipo`) nunca se agregarían a una base existente.
-# Es barato: solo crea lo que falta.
-db.init_db(conn)
+# La conexión cacheada queda abierta entre visitas y Supabase corta las que
+# pasan mucho tiempo inactivas: si ya no responde, se abre otra.
+if not db.conexion_viva(conn):
+    conexion.clear()
+    conn = conexion()
+preparar_esquema(conn, db.VERSION_ESQUEMA)
 
 DASHBOARD = "📊 Dashboard"
 FORMULARIO = "➕ Agregar / Editar Suplidor o Cliente"
@@ -102,6 +117,7 @@ CONTACTOS = "🗒️ Historial de Contactos"
 SEGUIMIENTO = "🔔 Seguimiento"
 FACTURAS = "🧾 Facturas"
 USUARIOS = "👥 Usuarios"   # solo para administradores
+ACTIVIDAD = "📜 Actividad"  # solo para administradores
 
 PAGINAS = [DASHBOARD, FORMULARIO, LISTA, CONTACTOS, SEGUIMIENTO, FACTURAS]
 
@@ -134,6 +150,15 @@ def mostrar_aviso():
         getattr(st, tipo)(mensaje)
 
 
+def anotar(accion, detalle="", usuario=None):
+    """Deja constancia en 📜 Actividad de lo que hizo el usuario con sesión."""
+    db.registrar_actividad(conn, usuario or sesion, accion, detalle)
+
+
+def es_admin():
+    return sesion["rol"] == db.ADMIN
+
+
 # --------------------------------------------------------------------------
 # Utilidades de presentación
 # --------------------------------------------------------------------------
@@ -148,6 +173,7 @@ COLUMNAS_TABLA = {
     "ubicacion": "Ubicación",
     "productos_interes": "Productos de interés",
     "estado": "Estado",
+    "asignado_nombre": "Asignado a",
     "ultimo_contacto": "Último contacto",
     "total_contactos": "Contactos",
     "proximo_seguimiento": "Próximo seguimiento",
@@ -171,8 +197,67 @@ def a_csv(df):
 
 
 def etiqueta_cliente(c):
+    """'Nombre — Empresa', con ⭐ si está asignado al usuario con sesión."""
     empresa = f" — {c['empresa']}" if c.get("empresa") else ""
-    return f"{c['nombre']}{empresa}"
+    mio = "⭐ " if es_mio(c) else ""
+    return f"{mio}{c['nombre']}{empresa}"
+
+
+def es_mio(c):
+    return c.get("asignado_a") == sesion["id"]
+
+
+def nombre_asignado(c):
+    if es_mio(c):
+        return "⭐ Tú"
+    return c.get("asignado_nombre") or "Sin asignar"
+
+
+def usuarios_asignables(incluir_id=None):
+    """Usuarios activos (más `incluir_id` aunque esté desactivado, para que el
+    formulario muestre bien una asignación existente)."""
+    return [u for u in db.listar_usuarios(conn) if u["activo"] or u["id"] == incluir_id]
+
+
+def selector_asignado(label, usuarios, actual=None, key=None, disabled=False):
+    """Selectbox 'Sin asignar' + usuarios; devuelve el id o None."""
+    por_id = {u["id"]: u for u in usuarios}
+    opciones = [None] + list(por_id)
+    return st.selectbox(
+        label,
+        opciones,
+        index=opciones.index(actual) if actual in opciones else 0,
+        format_func=lambda i: "Sin asignar" if i is None else por_id[i]["nombre"],
+        key=key,
+        disabled=disabled,
+    )
+
+
+def etiqueta_registro(c):
+    """'Nombre (Empresa)' para el registro de actividad, sin la ⭐."""
+    return f"{c['nombre']} ({c['empresa']})" if c.get("empresa") else c["nombre"]
+
+
+def recortar(texto, largo=40):
+    texto = texto or "—"
+    return texto if len(texto) <= largo else texto[: largo - 1] + "…"
+
+
+def describir_cambios(antes, despues, usuarios):
+    """'Estado: Negociación → Cliente Activo; Teléfono: — → 809…', o '' si
+    no cambió nada."""
+    nombres = {u["id"]: u["nombre"] for u in usuarios}
+    cambios = []
+    for campo, valor in despues.items():
+        previo = antes.get(campo)
+        if (previo or None) == (valor or None):
+            continue
+        etiqueta = COLUMNAS_TABLA.get(campo, campo)
+        if campo == "asignado_a":
+            etiqueta = "Asignado a"
+            previo, valor = nombres.get(previo, "Sin asignar"), nombres.get(valor, "Sin asignar")
+        cambios.append(f"{etiqueta}: {recortar(previo)} → {recortar(valor)}")
+    return "; ".join(cambios)
 
 
 def dias_desde(fecha_iso):
@@ -257,6 +342,7 @@ def formulario_login():
     if entrar:
         encontrado = db.autenticar(conn, usuario, contrasena)
         if encontrado:
+            anotar("Inicio de sesión", usuario=encontrado)
             st.session_state["usuario_id"] = encontrado["id"]
             st.rerun()
         st.error("Usuario o contraseña incorrectos, o la cuenta está desactivada.")
@@ -282,6 +368,7 @@ def formulario_primer_admin():
             st.error(error)
             return
         uid = db.crear_usuario(conn, usuario.strip(), nombre.strip(), contrasena, db.ADMIN)
+        anotar("Usuario creado", "Primera cuenta de administrador", usuario=db.obtener_usuario(conn, uid))
         st.session_state["usuario_id"] = uid
         st.rerun()
 
@@ -310,6 +397,7 @@ def formulario_mi_contrasena(usuario):
             st.error(error)
         else:
             db.cambiar_contrasena(conn, usuario["id"], nueva)
+            anotar("Contraseña cambiada", "Cambió su propia contraseña")
             st.success("Contraseña cambiada.")
 
 
@@ -399,6 +487,7 @@ def pagina_formulario():
 
     editando = cid != 0
     actual = por_id.get(cid, {})
+    usuarios = usuarios_asignables(actual.get("asignado_a"))
 
     st.divider()
 
@@ -452,6 +541,18 @@ def pagina_formulario():
             index=db.ESTADOS.index(estado_actual) if estado_actual in db.ESTADOS else 0,
             key="estado" + k,
         )
+        # Solo el administrador asigna. Lo que registra un usuario queda a su
+        # nombre; al editar, la asignación no cambia.
+        if es_admin():
+            with col3:
+                asignado_a = selector_asignado(
+                    "Asignado a", usuarios, actual.get("asignado_a"), key="asig" + k
+                )
+        else:
+            asignado_a = actual.get("asignado_a") if editando else sesion["id"]
+            col3.markdown(
+                f"**Asignado a:** {nombre_asignado(actual) if editando else '⭐ Tú'}"
+            )
         with col4:
             st.markdown("**Próximo seguimiento**")
             if editando and actual.get("proximo_seguimiento"):
@@ -479,13 +580,19 @@ def pagina_formulario():
                 "productos_interes": productos.strip(),
                 "estado": estado,
                 "tipo": tipo,
+                "asignado_a": asignado_a,
             }
 
             if editando:
                 db.actualizar_cliente(conn, cid, datos)
+                cambios = describir_cambios(actual, datos, usuarios)
+                if cambios:
+                    anotar("Edición", f"{tipo} {etiqueta_registro(datos)}: {cambios}")
                 avisar(f"{tipo} **{datos['nombre']}** actualizado.")
             else:
                 nuevo_id = db.crear_cliente(conn, datos)
+                asignado = {u["id"]: u["nombre"] for u in usuarios}.get(asignado_a, "Sin asignar")
+                anotar("Registro", f"{tipo} {etiqueta_registro(datos)} · asignado a {asignado}")
                 # Vaciar el formulario de alta para que no reaparezca relleno.
                 st.session_state["alta_gen"] = st.session_state.get("alta_gen", 0) + 1
                 st.session_state["cliente_foco"] = nuevo_id
@@ -502,6 +609,7 @@ def pagina_formulario():
     confirmar = col6.checkbox("Confirmo que quiero eliminar este registro", key="conf_del" + k)
     if col5.button("🗑️ Eliminar", disabled=not confirmar):
         db.eliminar_cliente(conn, cid)
+        anotar("Eliminación", f"{actual['tipo']} {etiqueta_registro(actual)}")
         st.session_state["cliente_foco"] = None
         avisar(f"{actual['tipo']} **{actual['nombre']}** eliminado.", "warning")
         st.rerun()
@@ -517,18 +625,30 @@ FILTRO_TIPO = {"Ambos": "Ambos", "Clientes": "Cliente", "Suplidores": "Suplidor"
 def pagina_lista():
     st.title(LISTA)
 
-    col1, col2, col3 = st.columns([3, 2, 2])
+    mostrar_aviso()
+
+    col1, col2, col3, col8 = st.columns([3, 2, 2, 2])
     busqueda = col1.text_input("🔍 Buscar", placeholder="Nombre, empresa, ubicación o productos…")
     tipo = col2.selectbox("Mostrar", list(FILTRO_TIPO))
     estado = col3.selectbox("Filtrar por estado", ["Todos"] + db.ESTADOS)
+    usuarios = usuarios_asignables()
+    nombres = {u["id"]: u["nombre"] for u in usuarios}
+    asignado = col8.selectbox(
+        "Asignado a",
+        [None, sesion["id"], db.SIN_ASIGNAR] + [i for i in nombres if i != sesion["id"]],
+        format_func=lambda i: {None: "Todos", sesion["id"]: "⭐ Mis asignados",
+                               db.SIN_ASIGNAR: "Sin asignar"}.get(i) or nombres[i],
+    )
 
     total = db.contar_clientes(conn)
     if total == 0:
         st.info(f"Todavía no hay suplidores ni clientes registrados. Empieza en **{FORMULARIO}**.")
         return
 
-    clientes = db.listar_clientes(conn, busqueda, estado, FILTRO_TIPO[tipo])
-    st.caption(f"Mostrando **{len(clientes)}** de **{total}** registros.")
+    clientes = db.listar_clientes(conn, busqueda, estado, FILTRO_TIPO[tipo], asignado)
+    for c in clientes:
+        c["asignado_nombre"] = nombre_asignado(c)
+    st.caption(f"Mostrando **{len(clientes)}** de **{total}** registros. ⭐ = asignado a ti.")
 
     df = tabla_clientes(clientes)
     if df.empty:
@@ -557,13 +677,42 @@ def pagina_lista():
     st.divider()
     st.subheader("Acciones rápidas")
     cid = selector_cliente("Suplidor o cliente", clientes)
-    col6, col7, col8 = st.columns(3)
+    col6, col7, col9 = st.columns(3)
     if col6.button("✏️ Editar este registro"):
         ir_a(FORMULARIO, cid)
     if col7.button("🗒️ Registrar un contacto"):
         ir_a(CONTACTOS, cid)
-    if col8.button("🧾 Generar factura"):
+    if col9.button("🧾 Generar factura"):
         ir_a(FACTURAS, cid)
+
+    if es_admin():
+        seccion_asignar(clientes, usuarios)
+
+
+def seccion_asignar(clientes, usuarios):
+    """Asignación en bloque (solo administradores) sobre la lista filtrada."""
+    st.divider()
+    st.subheader("👤 Asignar a un usuario")
+    st.caption("Usa los filtros de arriba para acotar la lista y asigna varios registros a la vez.")
+
+    por_id = {c["id"]: c for c in clientes}
+    todos = st.checkbox(f"Todos los que se muestran arriba ({len(clientes)})")
+    elegidos = list(por_id) if todos else st.multiselect(
+        "Registros",
+        list(por_id),
+        format_func=lambda i: etiqueta_cliente(por_id[i]),
+        placeholder="Elige uno o varios",
+    )
+    col1, col2 = st.columns([2, 1], vertical_alignment="bottom")
+    with col1:
+        destino = selector_asignado("Asignar a", usuarios)
+    if col2.button("✅ Asignar", disabled=not elegidos):
+        db.asignar_clientes(conn, elegidos, destino)
+        a_quien = {u["id"]: u["nombre"] for u in usuarios}.get(destino, "Sin asignar")
+        nombres = ", ".join(etiqueta_registro(por_id[i]) for i in elegidos)
+        anotar("Asignación", f"{len(elegidos)} registro(s) → {a_quien}: {nombres}")
+        avisar(f"**{len(elegidos)}** registro(s) asignado(s) a **{a_quien}**.")
+        st.rerun()
 
 
 # --------------------------------------------------------------------------
@@ -580,12 +729,13 @@ def pagina_contactos():
         return
 
     cid = selector_cliente("Cliente", clientes)
-    cliente = db.obtener_cliente(conn, cid)
+    cliente = next(c for c in clientes if c["id"] == cid)
 
-    col1, col2, col3 = st.columns(3)
+    col1, col2, col3, col0 = st.columns(4)
     col1.metric("Estado", cliente["estado"])
     col2.metric("Teléfono", cliente["telefono"] or "—")
     col3.metric("Próximo seguimiento", fecha_dmy(cliente["proximo_seguimiento"]) or "Sin programar")
+    col0.metric("Asignado a", nombre_asignado(cliente))
 
     st.divider()
     st.subheader("Registrar nuevo contacto")
@@ -604,6 +754,11 @@ def pagina_contactos():
 
     if guardar:
         proximo = db.agregar_contacto(conn, cid, fecha, tipo, notas.strip(), resultado)
+        anotar(
+            "Contacto registrado",
+            f"{cliente['tipo']} {etiqueta_registro(cliente)}: {tipo} del "
+            f"{fecha.strftime('%d/%m/%Y')} · {resultado}",
+        )
         avisar(f"Contacto registrado. Próximo seguimiento: {proximo.strftime('%d/%m/%Y')}.")
         st.rerun()
 
@@ -622,6 +777,11 @@ def pagina_contactos():
             st.write(c["notas"] or "_Sin notas._")
             if st.button("🗑️ Eliminar este contacto", key=f"del_contacto_{c['id']}"):
                 db.eliminar_contacto(conn, c["id"])
+                anotar(
+                    "Contacto eliminado",
+                    f"{cliente['tipo']} {etiqueta_registro(cliente)}: {c['tipo_contacto']} "
+                    f"del {fecha_dmy(c['fecha'])} · {c['resultado']}",
+                )
                 st.rerun()
 
     df_contactos = pd.DataFrame(contactos)[["fecha", "tipo_contacto", "resultado", "notas"]].rename(
@@ -663,6 +823,7 @@ def bloque_seguimiento(titulo, filas, mensaje_vacio):
             col1, col2, col3 = st.columns([3, 2, 2])
             col1.markdown(
                 f"**{etiqueta_cliente(c)}**  \n{c['estado']} · {c['ubicacion'] or 'Sin ubicación'}"
+                f"  \n👤 {nombre_asignado(c)}"
             )
             col2.markdown(
                 f"📞 {c['telefono'] or '—'}  \nÚltimo contacto: {c['ultimo_contacto'] or 'Nunca'}"
@@ -682,6 +843,11 @@ def bloque_seguimiento(titulo, filas, mensaje_vacio):
                 desde = max(date.today(), a_fecha(c["proximo_seguimiento"]))
                 nueva = desde + timedelta(days=int(dias_posponer))
                 db.fijar_proximo_seguimiento(conn, c["id"], nueva)
+                anotar(
+                    "Seguimiento pospuesto",
+                    f"{c['tipo']} {etiqueta_registro(c)}: "
+                    f"{fecha_dmy(c['proximo_seguimiento'])} → {nueva.strftime('%d/%m/%Y')}",
+                )
                 avisar(f"{c['nombre']}: seguimiento movido al {nueva.strftime('%d/%m/%Y')}.", "info")
                 st.rerun()
 
@@ -691,8 +857,15 @@ def pagina_seguimiento():
     st.caption("Clientes con seguimiento vencido, programado para hoy o próximo a vencer.")
     mostrar_aviso()
 
-    dias = st.slider("Mirar hacia adelante (días)", 1, 30, 7)
+    col_a, col_b = st.columns([3, 1], vertical_alignment="bottom")
+    dias = col_a.slider("Mirar hacia adelante (días)", 1, 30, 7)
+    # Los usuarios ven primero lo suyo; el administrador, todo.
+    solo_mios = col_b.toggle("⭐ Solo mis asignados", value=not es_admin())
     vencidos, para_hoy, proximos = db.seguimientos(conn, dias)
+    if solo_mios:
+        vencidos, para_hoy, proximos = (
+            [c for c in grupo if es_mio(c)] for grupo in (vencidos, para_hoy, proximos)
+        )
 
     col1, col2, col3 = st.columns(3)
     col1.metric("Vencidos", len(vencidos))
@@ -918,6 +1091,11 @@ def formulario_factura():
         "total": total,
     }
     fid = db.crear_factura(conn, datos, factura.generar_pdf, sesion["usuario"])
+    anotar(
+        "Factura generada",
+        f"{db.obtener_factura(conn, fid)['numero']} · {cliente['tipo']} "
+        f"{etiqueta_registro(cliente)} · RD$ {factura.monto(total)}",
+    )
 
     if p1_cedula.strip() and not cliente.get("cedula") and p1_nombre.strip() == cliente["nombre"]:
         db.guardar_cedula(conn, cid, p1_cedula.strip())
@@ -963,7 +1141,7 @@ def facturas_emitidas():
 
     # Solo la última de su año: borrar una intermedia dejaría un hueco en la
     # numeración.
-    if sesion["rol"] != db.ADMIN or not db.es_ultima_del_anio(conn, fid):
+    if not es_admin() or not db.es_ultima_del_anio(conn, fid):
         return
     st.caption(
         f"Es la última factura de {f['anio']}. Si se generó por error, al eliminarla el "
@@ -973,6 +1151,10 @@ def facturas_emitidas():
     confirmar = col2.checkbox("Confirmo que quiero eliminar esta factura", key=f"f_del_{fid}")
     if col1.button("🗑️ Eliminar factura", disabled=not confirmar, key=f"f_borrar_{fid}"):
         db.eliminar_factura(conn, fid)
+        anotar(
+            "Factura eliminada",
+            f"{f['numero']} · {f['cliente_nombre']} · RD$ {factura.monto(f['total'])}",
+        )
         if st.session_state.get("factura_generada") == fid:
             st.session_state.pop("factura_generada")
         avisar(f"Factura **{f['numero']}** eliminada.", "warning")
@@ -1009,11 +1191,17 @@ def numeracion_facturas():
         if error := db.fijar_siguiente_secuencia(conn, anio, int(nuevo)):
             st.error(error)
         else:
+            anotar(
+                "Numeración de facturas",
+                f"Próxima de {anio}: {db.numero_factura(anio, siguiente)} → "
+                f"{db.numero_factura(anio, int(nuevo))}",
+            )
             avisar(f"La próxima factura de {anio} será **{db.numero_factura(anio, int(nuevo))}**.")
             st.rerun()
 
     if fijada is not None and st.button("↩️ Volver a la numeración automática"):
         db.quitar_secuencia_fijada(conn, anio)
+        anotar("Numeración de facturas", f"{anio}: vuelve a la numeración automática")
         avisar(f"Numeración automática: la próxima de {anio} será "
                f"**{db.numero_factura(anio, db.siguiente_secuencia(conn, anio))}**.", "info")
         st.rerun()
@@ -1043,15 +1231,14 @@ def pagina_facturas():
                 st.session_state.pop("factura_generada")
                 st.rerun()
 
-    es_admin = sesion["rol"] == db.ADMIN
     pestanas = st.tabs(
-        ["🆕 Nueva factura", "📚 Facturas emitidas"] + (["🔢 Numeración"] if es_admin else [])
+        ["🆕 Nueva factura", "📚 Facturas emitidas"] + (["🔢 Numeración"] if es_admin() else [])
     )
     with pestanas[0]:
         formulario_factura()
     with pestanas[1]:
         facturas_emitidas()
-    if es_admin:
+    if es_admin():
         with pestanas[2]:
             numeracion_facturas()
 
@@ -1108,6 +1295,7 @@ def pagina_usuarios():
         elif db.crear_usuario(conn, usuario.strip(), nombre.strip(), contrasena, rol) is None:
             st.error(f"Ya existe el usuario **{usuario.strip()}**.")
         else:
+            anotar("Usuario creado", f"{nombre.strip()} ({usuario.strip()}) · {rol}")
             st.session_state["usuario_gen"] = st.session_state.get("usuario_gen", 0) + 1
             avisar(f"Usuario **{usuario.strip()}** creado. Ya puede iniciar sesión.")
             st.rerun()
@@ -1143,6 +1331,15 @@ def pagina_usuarios():
             st.error("El nombre es obligatorio.")
         else:
             db.actualizar_usuario(conn, uid, nombre.strip(), rol, activo)
+            cambios = describir_cambios(
+                {"Nombre": u["nombre"], "Rol": u["rol"],
+                 "Cuenta": "Activa" if u["activo"] else "Desactivada"},
+                {"Nombre": nombre.strip(), "Rol": rol,
+                 "Cuenta": "Activa" if activo else "Desactivada"},
+                [],
+            )
+            if cambios:
+                anotar("Usuario editado", f"{u['nombre']} ({u['usuario']}): {cambios}")
             avisar(f"Usuario **{u['usuario']}** actualizado.")
             st.rerun()
 
@@ -1158,6 +1355,7 @@ def pagina_usuarios():
             st.error(error)
         else:
             db.cambiar_contrasena(conn, uid, nueva)
+            anotar("Contraseña restablecida", f"{u['nombre']} ({u['usuario']})")
             avisar(f"Contraseña de **{u['usuario']}** restablecida.")
             st.rerun()
 
@@ -1169,8 +1367,67 @@ def pagina_usuarios():
     confirmar = col6.checkbox("Confirmo que quiero eliminar este usuario", key="ue_del" + k)
     if col5.button("🗑️ Eliminar usuario", disabled=not confirmar):
         db.eliminar_usuario(conn, uid)
+        anotar("Usuario eliminado", f"{u['nombre']} ({u['usuario']}) · sus registros quedan sin asignar")
         avisar(f"Usuario **{u['usuario']}** eliminado.", "warning")
         st.rerun()
+
+
+# --------------------------------------------------------------------------
+# 8. Actividad (solo administradores)
+# --------------------------------------------------------------------------
+
+def pagina_actividad():
+    st.title(ACTIVIDAD)
+    st.caption(
+        "Quién hizo qué y cuándo. Solo los administradores ven esta sección. "
+        "Hora de República Dominicana."
+    )
+
+    hoy = db.ahora().date()
+    col1, col2, col3 = st.columns([2, 2, 2])
+    rango = col1.date_input(
+        "Fechas", value=(hoy - timedelta(days=30), hoy), max_value=hoy, format="DD/MM/YYYY"
+    )
+    usuarios = db.listar_usuarios(conn)
+    nombres = {u["id"]: f"{u['nombre']} ({u['usuario']})" for u in usuarios}
+    usuario_id = col2.selectbox(
+        "Usuario", [None] + list(nombres), format_func=lambda i: "Todos" if i is None else nombres[i]
+    )
+    accion = col3.selectbox(
+        "Acción", [None] + db.acciones_registradas(conn),
+        format_func=lambda a: "Todas" if a is None else a,
+    )
+
+    # Mientras se elige el rango, el calendario devuelve solo la primera fecha.
+    desde, hasta = rango if len(rango) == 2 else (rango[0], rango[0])
+    filas = db.listar_actividad(conn, desde, hasta, usuario_id, accion)
+
+    if not filas:
+        st.info("No hay actividad con esos filtros.")
+        return
+
+    df = pd.DataFrame(filas).rename(
+        columns={
+            "fecha": "Fecha y hora",
+            "usuario_nombre": "Usuario",
+            "accion": "Acción",
+            "detalle": "Detalle",
+        }
+    )
+    df["Fecha y hora"] = pd.to_datetime(df["Fecha y hora"]).dt.strftime("%d/%m/%Y %H:%M")
+    st.caption(f"**{len(df)}** acciones (máximo 2,000; acota las fechas para ver más atrás).")
+    st.dataframe(
+        df,
+        width="stretch",
+        hide_index=True,
+        column_config={"Detalle": st.column_config.TextColumn(width="large")},
+    )
+    st.download_button(
+        "⬇️ Exportar a CSV",
+        data=a_csv(df),
+        file_name=f"actividad_{desde.isoformat()}_{hasta.isoformat()}.csv",
+        mime="text/csv",
+    )
 
 
 # --------------------------------------------------------------------------
@@ -1183,7 +1440,7 @@ if sesion is None:
     pantalla_acceso()
     st.stop()
 
-paginas = PAGINAS + ([USUARIOS] if sesion["rol"] == db.ADMIN else [])
+paginas = PAGINAS + ([USUARIOS, ACTIVIDAD] if es_admin() else [])
 
 # Debe aplicarse antes de crear el radio del menú.
 if "_destino" in st.session_state:
@@ -1201,16 +1458,20 @@ with st.sidebar:
     st.divider()
 
     _vencidos, _hoy, _ = db.seguimientos(conn)
-    pendientes = len(_vencidos) + len(_hoy)
+    pendientes = _vencidos + _hoy
     if pendientes:
-        st.warning(f"**{pendientes}** seguimiento(s) vencido(s) o para hoy.")
+        mios = sum(es_mio(c) for c in pendientes)
+        st.warning(
+            f"**{len(pendientes)}** seguimiento(s) vencido(s) o para hoy"
+            + (f", **{mios}** asignado(s) a ti ⭐." if mios else ".")
+        )
 
     with st.expander("🔑 Cambiar mi contraseña"):
         formulario_mi_contrasena(sesion)
     if st.button("🚪 Cerrar sesión"):
         st.session_state.clear()
         st.rerun()
-    st.caption(f"Base de datos: `{db.DB_PATH.name}`")
+    st.caption("Base de datos: Supabase (PostgreSQL)")
 
 VISTAS = {
     DASHBOARD: pagina_dashboard,
@@ -1220,6 +1481,7 @@ VISTAS = {
     SEGUIMIENTO: pagina_seguimiento,
     FACTURAS: pagina_facturas,
     USUARIOS: pagina_usuarios,
+    ACTIVIDAD: pagina_actividad,
 }
 
 VISTAS[pagina]()
