@@ -58,6 +58,16 @@ st.markdown(
           font-weight: 600;
           border-radius: 8px;
       }
+      /* Botones con aspecto de enlace: los nombres de las listas. */
+      .stButton > button[data-testid="stBaseButton-tertiary"] {
+          width: auto;
+          padding: 0.15rem 0;
+          font-weight: 500;
+          text-align: left;
+      }
+      .stButton > button[data-testid="stBaseButton-tertiary"]:hover {
+          text-decoration: underline;
+      }
       .stDownloadButton > button,
       .stFormSubmitButton > button {
           width: 100%;
@@ -184,14 +194,16 @@ COLUMNAS_TABLA = {
 }
 
 
-def tabla_clientes(filas, columnas=None):
-    """DataFrame con encabezados en español, listo para mostrar o exportar."""
-    cols = columnas or COLUMNAS_TABLA
-    if not filas:
-        return pd.DataFrame(columns=list(cols.values()))
-    df = pd.DataFrame(filas)
-    df = df[[c for c in cols if c in df.columns]]
-    return df.rename(columns=cols)
+def csv_cartera(tipo):
+    """Todos los clientes o todos los suplidores en CSV, con encabezados en
+    español. Cada tipo lleva solo su columna de relación."""
+    excluir = ("tipo", "total_clientes") if tipo == "Cliente" else ("tipo", "suplidor_nombre")
+    cols = {c: t for c, t in COLUMNAS_TABLA.items() if c not in excluir}
+    filas = db.listar_clientes(conn, tipo=tipo)
+    for c in filas:
+        c["asignado_nombre"] = ", ".join(c["asignados_nombres"]) or "Sin asignar"
+    df = pd.DataFrame(filas, columns=list(cols)).rename(columns=cols)
+    return a_csv(df)
 
 
 def a_csv(df):
@@ -454,6 +466,20 @@ def pagina_dashboard():
     c3.metric("Seguimientos vencidos", len(vencidos))
     c4.metric("Seguimientos para hoy", len(para_hoy))
 
+    col_a, col_b = st.columns(2)
+    col_a.download_button(
+        "⬇️ Exportar todos los clientes a CSV",
+        data=csv_cartera("Cliente"),
+        file_name=f"clientes_{date.today().isoformat()}.csv",
+        mime="text/csv",
+    )
+    col_b.download_button(
+        "⬇️ Exportar todos los suplidores a CSV",
+        data=csv_cartera("Suplidor"),
+        file_name=f"suplidores_{date.today().isoformat()}.csv",
+        mime="text/csv",
+    )
+
     st.divider()
     st.subheader("Registros por estado")
     df_estado = pd.DataFrame(
@@ -667,15 +693,33 @@ def pagina_formulario():
 # 3. Listas de suplidores y de clientes
 # --------------------------------------------------------------------------
 
-# El tipo ya lo dice la sección; cada lista lleva solo su columna de relación.
-COLUMNAS_CLIENTES = {c: t for c, t in COLUMNAS_TABLA.items() if c not in ("tipo", "total_clientes")}
-COLUMNAS_SUPLIDORES = {c: t for c, t in COLUMNAS_TABLA.items() if c not in ("tipo", "suplidor_nombre")}
+LISTAS = {"Cliente": LISTA_CLIENTES, "Suplidor": LISTA_SUPLIDORES}
 
 
-def pagina_lista(titulo, tipo, columnas, archivo, extra=None):
-    """Lista de clientes o de suplidores (según `tipo`) con filtros,
-    exportación y acciones rápidas. `extra(id, registro)` agrega acciones
-    propias de la sección sobre el registro elegido."""
+def abrir_ficha(tipo, cid):
+    """Abre la ficha del registro dentro de su lista, desde cualquier sección."""
+    st.session_state["ficha_" + tipo] = cid
+    ir_a(LISTAS[tipo], cid)
+
+
+def cerrar_fichas():
+    """Al cambiar de sección desde el menú, las listas vuelven a la lista."""
+    for tipo in LISTAS:
+        st.session_state.pop("ficha_" + tipo, None)
+
+
+def pagina_lista(titulo, tipo):
+    """Nombres de los clientes o de los suplidores (según `tipo`); al hacer
+    clic en uno se abre su ficha en esta misma sección."""
+    cid = st.session_state.get("ficha_" + tipo)
+    if cid:
+        registro = next((c for c in db.listar_clientes(conn, tipo=tipo) if c["id"] == cid), None)
+        if registro:
+            ficha(registro)
+            return
+        # Se eliminó o cambió de tipo: de vuelta a la lista.
+        st.session_state.pop("ficha_" + tipo)
+
     st.title(titulo)
     mostrar_aviso()
     plural = "clientes" if tipo == "Cliente" else "suplidores"
@@ -698,66 +742,79 @@ def pagina_lista(titulo, tipo, columnas, archivo, extra=None):
         return
 
     registros = db.listar_clientes(conn, busqueda, estado, tipo, asignado)
-    for c in registros:
-        c["asignado_nombre"] = nombre_asignado(c)
-    st.caption(f"Mostrando **{len(registros)}** de **{total}** {plural}. ⭐ = asignado a ti.")
-
-    df = tabla_clientes(registros, columnas)
-    if df.empty:
-        st.warning("Ningún registro coincide con la búsqueda.")
-    else:
-        st.dataframe(df, width="stretch", hide_index=True)
-
-    # En el archivo completo van los nombres tal cual, sin la ⭐ de quien exporta.
-    todos = db.listar_clientes(conn, tipo=tipo)
-    for c in todos:
-        c["asignado_nombre"] = ", ".join(c["asignados_nombres"]) or "Sin asignar"
-
-    col4, col5 = st.columns(2)
-    col4.download_button(
-        "⬇️ Exportar resultados a CSV",
-        data=a_csv(df),
-        file_name=f"{archivo}_{date.today().isoformat()}.csv",
-        mime="text/csv",
-        disabled=df.empty,
+    st.caption(
+        f"Mostrando **{len(registros)}** de **{total}** {plural}. "
+        "Haz clic en un nombre para ver su ficha. ⭐ = asignado a ti."
     )
-    col5.download_button(
-        "⬇️ Exportar TODOS a CSV",
-        data=a_csv(tabla_clientes(todos, columnas)),
-        file_name=f"{archivo}_completo_{date.today().isoformat()}.csv",
-        mime="text/csv",
-    )
-
     if not registros:
+        st.warning("Ningún registro coincide con la búsqueda.")
         return
 
-    st.divider()
-    st.subheader("Acciones rápidas")
-    cid = selector_cliente(tipo, registros)
-    col6, col7, col9 = st.columns(3)
-    if col6.button("✏️ Editar este registro"):
-        ir_a(FORMULARIO, cid)
-    if col7.button("🗒️ Registrar un contacto"):
-        ir_a(CONTACTOS, cid)
-    if col9.button("🧾 Generar factura"):
-        ir_a(FACTURAS, cid)
-
-    if extra:
-        extra(cid, next(c for c in registros if c["id"] == cid))
+    with st.container(border=True):
+        for c in registros:
+            if st.button(etiqueta_cliente(c), key=f"abrir_{c['id']}", type="tertiary"):
+                abrir_ficha(tipo, c["id"])
 
     if es_admin():
         seccion_asignar(registros, usuarios)
 
 
 def pagina_lista_clientes():
-    pagina_lista(LISTA_CLIENTES, "Cliente", COLUMNAS_CLIENTES, "clientes")
+    pagina_lista(LISTA_CLIENTES, "Cliente")
 
 
 def pagina_lista_suplidores():
-    pagina_lista(
-        LISTA_SUPLIDORES, "Suplidor", COLUMNAS_SUPLIDORES, "suplidores",
-        extra=seccion_clientes_del_suplidor,
-    )
+    pagina_lista(LISTA_SUPLIDORES, "Suplidor")
+
+
+def dato(col, etiqueta, valor):
+    col.markdown(f"**{etiqueta}**  \n{valor if valor not in (None, '') else '—'}")
+
+
+def ficha(c):
+    """Toda la información de un cliente o suplidor y lo que se hace con él."""
+    tipo = c["tipo"]
+    if st.button(f"← Volver a la lista de {'clientes' if tipo == 'Cliente' else 'suplidores'}",
+                 type="tertiary"):
+        cerrar_fichas()
+        st.rerun()
+
+    st.title(("⭐ " if es_mio(c) else "") + c["nombre"])
+    st.caption(f"{tipo} · {c['empresa']}" if c.get("empresa") else tipo)
+    mostrar_aviso()
+
+    with st.container(border=True):
+        col1, col2 = st.columns(2)
+        dato(col1, "Empresa", c["empresa"])
+        dato(col1, "Cédula / RNC", c["cedula"])
+        dato(col1, "Teléfono", c["telefono"])
+        dato(col1, "Email", c["email"])
+        dato(col1, "Ubicación", c["ubicacion"])
+        dato(col2, "Estado", c["estado"])
+        dato(col2, "Asignado a", nombre_asignado(c))
+        dato(col2, "Último contacto", fecha_dmy(c["ultimo_contacto"]) or "Nunca")
+        dato(col2, "Contactos registrados", c["total_contactos"])
+        dato(col2, "Próximo seguimiento", fecha_dmy(c["proximo_seguimiento"]))
+        dato(col2, "Alta", fecha_dmy(c["fecha_creacion"]))
+        dato(st, "Productos de interés", c["productos_interes"])
+        if tipo == "Cliente":
+            st.markdown("**Suplidor**")
+            if not c["suplidor_id"]:
+                st.markdown("Sin suplidor")
+            elif st.button(c["suplidor_nombre"], key="ir_suplidor", type="tertiary"):
+                abrir_ficha("Suplidor", c["suplidor_id"])
+
+    st.subheader("Acciones rápidas")
+    col6, col7, col9 = st.columns(3)
+    if col6.button("✏️ Editar este registro"):
+        ir_a(FORMULARIO, c["id"])
+    if col7.button("🗒️ Registrar un contacto"):
+        ir_a(CONTACTOS, c["id"])
+    if col9.button("🧾 Generar factura"):
+        ir_a(FACTURAS, c["id"])
+
+    if tipo == "Suplidor":
+        seccion_clientes_del_suplidor(c["id"], c)
 
 
 def seccion_clientes_del_suplidor(sid, suplidor):
@@ -774,6 +831,12 @@ def seccion_clientes_del_suplidor(sid, suplidor):
     por_id = {c["id"]: c for c in clientes}
     actuales = [c["id"] for c in clientes if c["suplidor_id"] == sid]
 
+    if not actuales:
+        st.caption("Este suplidor todavía no tiene clientes.")
+    for i in actuales:
+        if st.button(etiqueta_cliente(por_id[i]), key=f"ir_cliente_{i}", type="tertiary"):
+            abrir_ficha("Cliente", i)
+
     def etiqueta(i):
         c = por_id[i]
         otro = c["suplidor_id"] not in (None, sid)
@@ -781,7 +844,7 @@ def seccion_clientes_del_suplidor(sid, suplidor):
 
     with st.form(f"form_clientes_suplidor_{sid}"):
         elegidos = st.multiselect(
-            "Clientes asignados a este suplidor",
+            "Cambiar los clientes de este suplidor",
             list(por_id),
             default=actuales,
             format_func=etiqueta,
@@ -1588,7 +1651,9 @@ with st.sidebar:
     st.caption("CRM de suplidores y clientes · arroz, maíz, abono")
     st.markdown(f"👤 **{sesion['nombre']}** · {sesion['rol']}")
     st.divider()
-    pagina = st.radio("Secciones", paginas, key="nav", label_visibility="collapsed")
+    pagina = st.radio(
+        "Secciones", paginas, key="nav", label_visibility="collapsed", on_change=cerrar_fichas
+    )
     st.divider()
 
     _vencidos, _hoy, _ = db.seguimientos(conn)

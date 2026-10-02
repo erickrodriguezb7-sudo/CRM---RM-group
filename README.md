@@ -66,10 +66,10 @@ pip install -r requirements.txt
 
 | Sección | Para qué sirve |
 |---|---|
-| **📊 Dashboard** | Clientes activos, seguimientos vencidos y para hoy, registros por estado y quiénes llevan 7+ días sin contactar. |
+| **📊 Dashboard** | Clientes activos, seguimientos vencidos y para hoy, registros por estado y quiénes llevan 7+ días sin contactar. Exportación a CSV de todos los clientes o todos los suplidores. |
 | **➕ Agregar / Editar Suplidor o Cliente** | Alta de suplidores y clientes nuevos y edición o eliminación de los existentes. Los productos de interés se escriben libremente. A un cliente se le puede poner su suplidor (opcional). |
-| **🏭 Lista de Suplidores** | Búsqueda por nombre, empresa, ubicación o productos; filtro por estado y usuario asignado; exportación a CSV. Al elegir un suplidor se escogen los clientes que atiende. |
-| **📋 Lista de Clientes** | Igual que la de suplidores, con la columna del suplidor de cada cliente. |
+| **🏭 Lista de Suplidores** | Solo los nombres, con búsqueda y filtros por estado y usuario asignado. Al hacer clic en un nombre se abre su ficha: todos sus datos, acciones rápidas (editar, registrar contacto, facturar) y los clientes que atiende. Al final, *Asignar usuarios* (administradores). |
+| **📋 Lista de Clientes** | Igual que la de suplidores; la ficha del cliente muestra su suplidor, con enlace a la ficha de este. |
 | **🗒️ Historial de Contactos** | Bitácora por cliente: fecha, tipo (llamada, email, reunión, WhatsApp, visita), notas y resultado. |
 | **🔔 Seguimiento** | Seguimientos vencidos, los de hoy y los próximos; botón para posponer los días que elijas. |
 | **🧾 Facturas** | Genera la factura de un suplidor o cliente con el diseño de RM Group, numerada sola (`RMG-2026-0001`, `0002`…), y la descarga en PDF. Guarda todas las emitidas. |
@@ -147,8 +147,8 @@ se editen; al abrirlos en el formulario aparecen con *Negociación*.
 - **Posponer**: en *Seguimiento* eliges cuántos días. Un seguimiento vencido se
   pospone desde hoy; uno futuro, desde su fecha programada. Se mantiene hasta el
   próximo recálculo.
-- **Exportar a CSV**: en *Lista de Suplidores* y *Lista de Clientes* exportas los resultados filtrados o
-  toda la cartera; en *Historial de Contactos*, la bitácora de un cliente. Los
+- **Exportar a CSV**: en el *Dashboard*, todos los clientes o todos los
+  suplidores; en *Historial de Contactos*, la bitácora de un cliente. Los
   archivos salen en UTF-8 con BOM para que Excel muestre bien las tildes y la ñ.
 - **Eliminar un cliente** borra también todo su historial de contactos. Por eso
   hay que marcar la casilla de confirmación antes de que el botón se active.
