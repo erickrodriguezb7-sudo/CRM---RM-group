@@ -25,7 +25,7 @@ MTIME_CARGA = Path(__file__).stat().st_mtime
 
 # Súbelo cada vez que init_db cambie: app.py vuelve a correrlo al notar el
 # cambio aunque la conexión cacheada ya existiera.
-VERSION_ESQUEMA = 3
+VERSION_ESQUEMA = 4
 
 # El servidor de Streamlit Cloud corre en UTC; la hora del registro de
 # actividad y del último acceso se guarda en la hora local.
@@ -164,15 +164,6 @@ def init_db(conn):
             """
         )
 
-        # Usuario responsable de cada registro. Al eliminar el usuario, sus
-        # registros quedan sin asignar.
-        conn.execute(
-            """
-            ALTER TABLE clientes ADD COLUMN IF NOT EXISTS asignado_a INTEGER
-                REFERENCES usuarios (id) ON DELETE SET NULL
-            """
-        )
-
         # Registro de actividad. Guarda el nombre del usuario y del registro
         # como texto, sin claves foráneas, para que la historia siga legible
         # aunque después se eliminen.
@@ -190,6 +181,46 @@ def init_db(conn):
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_actividad_fecha ON actividad (fecha DESC)"
+        )
+
+        # Usuarios responsables de cada registro (pueden ser varios). Al
+        # eliminar el usuario o el registro, la asignación desaparece sola.
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS asignaciones (
+                cliente_id INTEGER NOT NULL REFERENCES clientes (id) ON DELETE CASCADE,
+                usuario_id INTEGER NOT NULL REFERENCES usuarios (id) ON DELETE CASCADE,
+                PRIMARY KEY (cliente_id, usuario_id)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_asignaciones_usuario ON asignaciones (usuario_id)"
+        )
+        # Antes cada registro tenía un solo usuario en `asignado_a`: se pasa a
+        # la tabla nueva y se quita la columna para que no quede desfasada.
+        if conn.execute(
+            """
+            SELECT 1 FROM information_schema.columns
+             WHERE table_name = 'clientes' AND column_name = 'asignado_a'
+            """
+        ).fetchone():
+            conn.execute(
+                """
+                INSERT INTO asignaciones (cliente_id, usuario_id)
+                SELECT id, asignado_a FROM clientes WHERE asignado_a IS NOT NULL
+                ON CONFLICT DO NOTHING
+                """
+            )
+            conn.execute("ALTER TABLE clientes DROP COLUMN asignado_a")
+
+        # Suplidor que atiende a cada cliente (opcional). Si se elimina el
+        # suplidor, sus clientes quedan sin suplidor.
+        conn.execute(
+            """
+            ALTER TABLE clientes ADD COLUMN IF NOT EXISTS suplidor_id INTEGER
+                REFERENCES clientes (id) ON DELETE SET NULL
+            """
         )
 
         # La cédula (o RNC) aparece en la factura.
@@ -245,28 +276,46 @@ def init_db(conn):
 # --------------------------------------------------------------------------
 
 def crear_cliente(conn, datos):
+    """`datos` lleva además `asignados` (lista de ids de usuario) y
+    `suplidor_id` (None si no tiene; los suplidores nunca lo llevan)."""
     with conn.transaction():
         nuevo_id = conn.execute(
             """
             INSERT INTO clientes (nombre, empresa, telefono, email, ubicacion, cedula,
-                                  productos_interes, estado, tipo, asignado_a,
+                                  productos_interes, estado, tipo, suplidor_id,
                                   fecha_creacion)
             VALUES (%(nombre)s, %(empresa)s, %(telefono)s, %(email)s, %(ubicacion)s,
                     %(cedula)s, %(productos_interes)s, %(estado)s, %(tipo)s,
-                    %(asignado_a)s, %(fecha_creacion)s)
+                    %(suplidor_id)s, %(fecha_creacion)s)
             RETURNING id
             """,
-            {**datos, "fecha_creacion": date.today().isoformat()},
+            {**_sin_suplidor_si_no_es_cliente(datos), "fecha_creacion": date.today().isoformat()},
         ).fetchone()["id"]
+        _fijar_asignados(conn, nuevo_id, datos["asignados"])
         recalcular_seguimiento(conn, nuevo_id)
     return nuevo_id
+
+
+def _sin_suplidor_si_no_es_cliente(datos):
+    return datos if datos["tipo"] == "Cliente" else {**datos, "suplidor_id": None}
+
+
+def _fijar_asignados(conn, cliente_id, usuario_ids):
+    """Deja exactamente esos usuarios asignados al registro."""
+    conn.execute("DELETE FROM asignaciones WHERE cliente_id = %s", (cliente_id,))
+    for uid in set(usuario_ids):
+        conn.execute(
+            "INSERT INTO asignaciones (cliente_id, usuario_id) VALUES (%s, %s)",
+            (cliente_id, uid),
+        )
 
 
 def actualizar_cliente(conn, cliente_id, datos):
     """Guarda los datos del registro.
 
     El seguimiento solo se recalcula si cambia el tipo o el estado; corregir un
-    teléfono no debe deshacer un seguimiento pospuesto a mano.
+    teléfono no debe deshacer un seguimiento pospuesto a mano. Un suplidor que
+    pasa a ser cliente suelta los clientes que tenía vinculados.
     """
     with conn.transaction():
         antes = obtener_cliente(conn, cliente_id)
@@ -276,11 +325,16 @@ def actualizar_cliente(conn, cliente_id, datos):
                SET nombre = %(nombre)s, empresa = %(empresa)s, telefono = %(telefono)s,
                    email = %(email)s, ubicacion = %(ubicacion)s, cedula = %(cedula)s,
                    productos_interes = %(productos_interes)s, estado = %(estado)s,
-                   tipo = %(tipo)s, asignado_a = %(asignado_a)s
+                   tipo = %(tipo)s, suplidor_id = %(suplidor_id)s
              WHERE id = %(id)s
             """,
-            {**datos, "id": cliente_id},
+            {**_sin_suplidor_si_no_es_cliente(datos), "id": cliente_id},
         )
+        _fijar_asignados(conn, cliente_id, datos["asignados"])
+        if antes["tipo"] == "Suplidor" and datos["tipo"] != "Suplidor":
+            conn.execute(
+                "UPDATE clientes SET suplidor_id = NULL WHERE suplidor_id = %s", (cliente_id,)
+            )
         if (antes["tipo"], antes["estado"]) != (datos["tipo"], datos["estado"]):
             recalcular_seguimiento(conn, cliente_id)
 
@@ -294,27 +348,37 @@ def obtener_cliente(conn, cliente_id):
     return conn.execute("SELECT * FROM clientes WHERE id = %s", (cliente_id,)).fetchone()
 
 
-# Nombre del usuario asignado, para las consultas que lo muestran.
-UNIR_ASIGNADO = "LEFT JOIN usuarios u ON u.id = c.asignado_a"
+# Usuarios asignados (`asignados`: ids; `asignados_nombres`: nombres en el
+# mismo orden), nombre del suplidor y cuántos clientes tiene cada suplidor,
+# para las consultas que los muestran. Subconsultas en vez de JOIN para no
+# multiplicar las filas de contactos.
+COLUMNAS_EXTRA = """
+       COALESCE((SELECT array_agg(u.id ORDER BY LOWER(u.nombre))
+                   FROM asignaciones a JOIN usuarios u ON u.id = a.usuario_id
+                  WHERE a.cliente_id = c.id), '{}')     AS asignados,
+       COALESCE((SELECT array_agg(u.nombre ORDER BY LOWER(u.nombre))
+                   FROM asignaciones a JOIN usuarios u ON u.id = a.usuario_id
+                  WHERE a.cliente_id = c.id), '{}')     AS asignados_nombres,
+       (SELECT s.nombre FROM clientes s WHERE s.id = c.suplidor_id) AS suplidor_nombre,
+       (SELECT COUNT(*) FROM clientes h WHERE h.suplidor_id = c.id) AS total_clientes
+"""
 
 
 def listar_clientes(conn, busqueda="", estado="Todos", tipo="Ambos", asignado=None):
-    """Lista suplidores y clientes con su último contacto, total de contactos
-    y nombre del usuario asignado (`asignado_nombre`).
+    """Lista suplidores y clientes con su último contacto, total de contactos,
+    usuarios asignados y suplidor (ver COLUMNAS_EXTRA).
 
     La búsqueda cubre nombre, empresa, ubicación y productos de interés, sin
     distinguir mayúsculas. `tipo` filtra por "Cliente" o "Suplidor"; "Ambos"
     no filtra. `asignado`: None no filtra, SIN_ASIGNAR trae los que no tienen
-    usuario y un id trae los de ese usuario.
+    usuario y un id trae los asignados a ese usuario (solo o con otros).
     """
     sql = f"""
-        SELECT c.*,
-               u.nombre                          AS asignado_nombre,
+        SELECT c.*, {COLUMNAS_EXTRA},
                MAX(ct.fecha)                     AS ultimo_contacto,
                COUNT(ct.id)                      AS total_contactos
           FROM clientes c
           LEFT JOIN contactos ct ON ct.cliente_id = c.id
-          {UNIR_ASIGNADO}
          WHERE 1 = 1
     """
     params = {}
@@ -335,25 +399,68 @@ def listar_clientes(conn, busqueda="", estado="Todos", tipo="Ambos", asignado=No
         params["tipo"] = tipo
 
     if asignado == SIN_ASIGNAR:
-        sql += " AND c.asignado_a IS NULL"
+        sql += " AND NOT EXISTS (SELECT 1 FROM asignaciones a WHERE a.cliente_id = c.id)"
     elif asignado is not None:
-        sql += " AND c.asignado_a = %(asignado)s"
+        sql += """
+             AND EXISTS (SELECT 1 FROM asignaciones a
+                          WHERE a.cliente_id = c.id AND a.usuario_id = %(asignado)s)
+        """
         params["asignado"] = asignado
 
-    sql += " GROUP BY c.id, u.nombre ORDER BY LOWER(c.nombre)"
+    sql += " GROUP BY c.id ORDER BY LOWER(c.nombre)"
     return conn.execute(sql, params).fetchall()
 
 
-def contar_clientes(conn):
-    return conn.execute("SELECT COUNT(*) AS n FROM clientes").fetchone()["n"]
+def contar_clientes(conn, tipo=None):
+    if tipo is None:
+        return conn.execute("SELECT COUNT(*) AS n FROM clientes").fetchone()["n"]
+    return conn.execute(
+        "SELECT COUNT(*) AS n FROM clientes WHERE tipo = %s", (tipo,)
+    ).fetchone()["n"]
 
 
-def asignar_clientes(conn, cliente_ids, usuario_id):
-    """Asigna los registros al usuario (None los deja sin asignar)."""
-    conn.execute(
-        "UPDATE clientes SET asignado_a = %s WHERE id = ANY(%s)",
-        (usuario_id, list(cliente_ids)),
-    )
+AGREGAR, QUITAR, REEMPLAZAR = "Agregar", "Quitar", "Reemplazar"
+
+
+def asignar_clientes(conn, cliente_ids, usuario_ids, modo=AGREGAR):
+    """Cambia en bloque los usuarios asignados a los registros.
+
+    AGREGAR los suma a los que ya tenía cada registro, QUITAR se los retira y
+    REEMPLAZAR deja solo esos (con la lista vacía quedan sin asignar).
+    """
+    cliente_ids, usuario_ids = list(cliente_ids), list(usuario_ids)
+    with conn.transaction():
+        if modo == QUITAR:
+            conn.execute(
+                "DELETE FROM asignaciones WHERE cliente_id = ANY(%s) AND usuario_id = ANY(%s)",
+                (cliente_ids, usuario_ids),
+            )
+            return
+        if modo == REEMPLAZAR:
+            conn.execute("DELETE FROM asignaciones WHERE cliente_id = ANY(%s)", (cliente_ids,))
+        conn.execute(
+            """
+            INSERT INTO asignaciones (cliente_id, usuario_id)
+            SELECT c, u FROM unnest(%s::int[]) AS c CROSS JOIN unnest(%s::int[]) AS u
+            ON CONFLICT DO NOTHING
+            """,
+            (cliente_ids, usuario_ids),
+        )
+
+
+def vincular_clientes(conn, suplidor_id, cliente_ids):
+    """Deja a esos clientes, y solo a esos, con el suplidor. Un cliente que
+    tenía otro suplidor pasa a este."""
+    cliente_ids = list(cliente_ids)
+    with conn.transaction():
+        conn.execute(
+            "UPDATE clientes SET suplidor_id = NULL WHERE suplidor_id = %s AND NOT id = ANY(%s)",
+            (suplidor_id, cliente_ids),
+        )
+        conn.execute(
+            "UPDATE clientes SET suplidor_id = %s WHERE id = ANY(%s) AND tipo = 'Cliente'",
+            (suplidor_id, cliente_ids),
+        )
 
 
 # --------------------------------------------------------------------------
@@ -456,14 +563,13 @@ def seguimientos(conn, dias_proximos=7):
 
     filas = conn.execute(
         f"""
-        SELECT c.*, u.nombre AS asignado_nombre, MAX(ct.fecha) AS ultimo_contacto
+        SELECT c.*, {COLUMNAS_EXTRA}, MAX(ct.fecha) AS ultimo_contacto
           FROM clientes c
           LEFT JOIN contactos ct ON ct.cliente_id = c.id
-          {UNIR_ASIGNADO}
          WHERE c.proximo_seguimiento IS NOT NULL
            AND c.proximo_seguimiento <> ''
            AND c.proximo_seguimiento <= %s
-         GROUP BY c.id, u.nombre
+         GROUP BY c.id
          ORDER BY c.proximo_seguimiento
         """,
         (limite,),
@@ -482,14 +588,12 @@ def clientes_sin_contactar(conn, dias=DIAS_SIN_CONTACTO):
     limite = (date.today() - timedelta(days=dias)).isoformat()
     return conn.execute(
         f"""
-        SELECT c.*,
-               u.nombre      AS asignado_nombre,
+        SELECT c.*, {COLUMNAS_EXTRA},
                MAX(ct.fecha) AS ultimo_contacto,
                COUNT(ct.id)  AS total_contactos
           FROM clientes c
           LEFT JOIN contactos ct ON ct.cliente_id = c.id
-          {UNIR_ASIGNADO}
-         GROUP BY c.id, u.nombre
+         GROUP BY c.id
         HAVING COALESCE(MAX(ct.fecha), c.fecha_creacion) <= %s
          ORDER BY COALESCE(MAX(ct.fecha), c.fecha_creacion)
         """,

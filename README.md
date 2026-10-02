@@ -67,8 +67,9 @@ pip install -r requirements.txt
 | Sección | Para qué sirve |
 |---|---|
 | **📊 Dashboard** | Clientes activos, seguimientos vencidos y para hoy, registros por estado y quiénes llevan 7+ días sin contactar. |
-| **➕ Agregar / Editar Suplidor o Cliente** | Alta de suplidores y clientes nuevos y edición o eliminación de los existentes. Los productos de interés se escriben libremente. |
-| **📋 Lista de Suplidores y Clientes** | Búsqueda por nombre, empresa, ubicación o productos; filtro por tipo (clientes, suplidores o ambos) y por estado; exportación a CSV. |
+| **➕ Agregar / Editar Suplidor o Cliente** | Alta de suplidores y clientes nuevos y edición o eliminación de los existentes. Los productos de interés se escriben libremente. A un cliente se le puede poner su suplidor (opcional). |
+| **🏭 Lista de Suplidores** | Búsqueda por nombre, empresa, ubicación o productos; filtro por estado y usuario asignado; exportación a CSV. Al elegir un suplidor se escogen los clientes que atiende. |
+| **📋 Lista de Clientes** | Igual que la de suplidores, con la columna del suplidor de cada cliente. |
 | **🗒️ Historial de Contactos** | Bitácora por cliente: fecha, tipo (llamada, email, reunión, WhatsApp, visita), notas y resultado. |
 | **🔔 Seguimiento** | Seguimientos vencidos, los de hoy y los próximos; botón para posponer los días que elijas. |
 | **🧾 Facturas** | Genera la factura de un suplidor o cliente con el diseño de RM Group, numerada sola (`RMG-2026-0001`, `0002`…), y la descarga en PDF. Guarda todas las emitidas. |
@@ -84,12 +85,16 @@ pip install -r requirements.txt
   todo si está publicada en internet: quien llegue primero crea esa cuenta).
 - **Roles**: *Administrador* ve todo, incluidas **👥 Usuarios** y
   **📜 Actividad**. *Usuario* ve todas las secciones del CRM excepto esas dos.
-- **Asignación**: cada suplidor o cliente puede tener un usuario responsable.
+- **Asignación**: cada suplidor o cliente puede tener uno o varios usuarios responsables.
   Todos ven todos los registros, pero los asignados a ti llevan ⭐, la lista se
   filtra por *Asignado a* y en *Seguimiento* los usuarios ven primero solo los
   suyos. Lo que registra un usuario queda asignado a él; solo el administrador
   cambia la asignación (en el formulario de edición, o varios a la vez al final
-  de la *Lista*).
+  de cada lista: agregar usuarios, quitarlos o reemplazar los que había).
+- **Suplidor de cada cliente**: un cliente tiene como máximo un suplidor; un
+  suplidor puede tener muchos clientes. Se fija en el formulario del cliente o
+  desde la *Lista de Suplidores*. Si se elimina el suplidor, o pasa a ser
+  cliente, sus clientes quedan sin suplidor.
 - **Actividad**: cada inicio de sesión, alta, edición (con qué cambió),
   eliminación, contacto, seguimiento pospuesto, asignación, factura (generada,
   eliminada o cambio de numeración) y cambio de usuarios
@@ -142,7 +147,7 @@ se editen; al abrirlos en el formulario aparecen con *Negociación*.
 - **Posponer**: en *Seguimiento* eliges cuántos días. Un seguimiento vencido se
   pospone desde hoy; uno futuro, desde su fecha programada. Se mantiene hasta el
   próximo recálculo.
-- **Exportar a CSV**: en *Lista de Clientes* exportas los resultados filtrados o
+- **Exportar a CSV**: en *Lista de Suplidores* y *Lista de Clientes* exportas los resultados filtrados o
   toda la cartera; en *Historial de Contactos*, la bitácora de un cliente. Los
   archivos salen en UTF-8 con BOM para que Excel muestre bien las tildes y la ñ.
 - **Eliminar un cliente** borra también todo su historial de contactos. Por eso
@@ -213,9 +218,14 @@ crm-suplidores/
 
 **`clientes`** — `id`, `nombre`, `tipo` (`Cliente` o `Suplidor`), `empresa`,
 `cedula`, `telefono`, `email`, `ubicacion`, `productos_interes` (texto libre), `estado`,
-`fecha_creacion`, `proximo_seguimiento`, `asignado_a` (id del usuario
-responsable; queda vacío si ese usuario se elimina), `giro_negocio` (ya no se
-usa; se conserva para no perder datos anteriores)
+`fecha_creacion`, `proximo_seguimiento`, `suplidor_id` (id del suplidor de un
+cliente; vacío en los suplidores y si se elimina el suplidor), `giro_negocio`
+(ya no se usa; se conserva para no perder datos anteriores)
+
+**`asignaciones`** — `cliente_id`, `usuario_id`: los usuarios responsables de
+cada suplidor o cliente (varios por registro). Se borran solas al eliminar el
+usuario o el registro. Reemplaza la antigua columna `clientes.asignado_a`, que se
+migra aquí y se elimina la primera vez que arranca esta versión.
 
 **`contactos`** — `id`, `cliente_id`, `fecha`, `tipo_contacto`, `notas`,
 `resultado`

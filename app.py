@@ -112,14 +112,15 @@ preparar_esquema(conn, db.VERSION_ESQUEMA)
 
 DASHBOARD = "📊 Dashboard"
 FORMULARIO = "➕ Agregar / Editar Suplidor o Cliente"
-LISTA = "📋 Lista de Suplidores y Clientes"
+LISTA_SUPLIDORES = "🏭 Lista de Suplidores"
+LISTA_CLIENTES = "📋 Lista de Clientes"
 CONTACTOS = "🗒️ Historial de Contactos"
 SEGUIMIENTO = "🔔 Seguimiento"
 FACTURAS = "🧾 Facturas"
 USUARIOS = "👥 Usuarios"   # solo para administradores
 ACTIVIDAD = "📜 Actividad"  # solo para administradores
 
-PAGINAS = [DASHBOARD, FORMULARIO, LISTA, CONTACTOS, SEGUIMIENTO, FACTURAS]
+PAGINAS = [DASHBOARD, FORMULARIO, LISTA_SUPLIDORES, LISTA_CLIENTES, CONTACTOS, SEGUIMIENTO, FACTURAS]
 
 
 def ir_a(pagina, cliente_id=None):
@@ -173,6 +174,8 @@ COLUMNAS_TABLA = {
     "ubicacion": "Ubicación",
     "productos_interes": "Productos de interés",
     "estado": "Estado",
+    "suplidor_nombre": "Suplidor",
+    "total_clientes": "Clientes",
     "asignado_nombre": "Asignado a",
     "ultimo_contacto": "Último contacto",
     "total_contactos": "Contactos",
@@ -204,32 +207,48 @@ def etiqueta_cliente(c):
 
 
 def es_mio(c):
-    return c.get("asignado_a") == sesion["id"]
+    return sesion["id"] in (c.get("asignados") or [])
 
 
 def nombre_asignado(c):
-    if es_mio(c):
-        return "⭐ Tú"
-    return c.get("asignado_nombre") or "Sin asignar"
+    """'⭐ Tú, Ana, Pedro', o 'Sin asignar'."""
+    nombres = [
+        "⭐ Tú" if uid == sesion["id"] else nombre
+        for uid, nombre in zip(c.get("asignados") or [], c.get("asignados_nombres") or [])
+    ]
+    nombres.sort(key=lambda n: n != "⭐ Tú")
+    return ", ".join(nombres) or "Sin asignar"
 
 
-def usuarios_asignables(incluir_id=None):
-    """Usuarios activos (más `incluir_id` aunque esté desactivado, para que el
-    formulario muestre bien una asignación existente)."""
-    return [u for u in db.listar_usuarios(conn) if u["activo"] or u["id"] == incluir_id]
+def usuarios_asignables(incluir_ids=()):
+    """Usuarios activos (más `incluir_ids` aunque estén desactivados, para que
+    el formulario muestre bien una asignación existente)."""
+    return [u for u in db.listar_usuarios(conn) if u["activo"] or u["id"] in incluir_ids]
 
 
-def selector_asignado(label, usuarios, actual=None, key=None, disabled=False):
-    """Selectbox 'Sin asignar' + usuarios; devuelve el id o None."""
+def selector_asignados(label, usuarios, actuales=(), key=None):
+    """Multiselect de usuarios; devuelve la lista de ids (vacía = sin asignar)."""
     por_id = {u["id"]: u for u in usuarios}
+    return st.multiselect(
+        label,
+        list(por_id),
+        default=[i for i in actuales if i in por_id],
+        format_func=lambda i: por_id[i]["nombre"],
+        placeholder="Sin asignar",
+        key=key,
+    )
+
+
+def selector_suplidor(label, suplidores, actual=None, key=None):
+    """Selectbox 'Sin suplidor' + suplidores; devuelve el id o None."""
+    por_id = {s["id"]: s for s in suplidores}
     opciones = [None] + list(por_id)
     return st.selectbox(
         label,
         opciones,
         index=opciones.index(actual) if actual in opciones else 0,
-        format_func=lambda i: "Sin asignar" if i is None else por_id[i]["nombre"],
+        format_func=lambda i: "Sin suplidor" if i is None else etiqueta_registro(por_id[i]),
         key=key,
-        disabled=disabled,
     )
 
 
@@ -243,19 +262,31 @@ def recortar(texto, largo=40):
     return texto if len(texto) <= largo else texto[: largo - 1] + "…"
 
 
-def describir_cambios(antes, despues, usuarios):
+def nombres_usuarios(ids, usuarios):
+    """'Ana, Pedro' a partir de los ids, o 'Sin asignar'."""
+    nombres = {u["id"]: u["nombre"] for u in usuarios}
+    return ", ".join(sorted(nombres.get(i, "?") for i in ids)) or "Sin asignar"
+
+
+def describir_cambios(antes, despues, usuarios, suplidores=()):
     """'Estado: Negociación → Cliente Activo; Teléfono: — → 809…', o '' si
     no cambió nada."""
-    nombres = {u["id"]: u["nombre"] for u in usuarios}
+    nombres_sup = {s["id"]: s["nombre"] for s in suplidores}
     cambios = []
     for campo, valor in despues.items():
         previo = antes.get(campo)
-        if (previo or None) == (valor or None):
-            continue
-        etiqueta = COLUMNAS_TABLA.get(campo, campo)
-        if campo == "asignado_a":
+        if campo == "asignados":
+            if sorted(previo or []) == sorted(valor):
+                continue
             etiqueta = "Asignado a"
-            previo, valor = nombres.get(previo, "Sin asignar"), nombres.get(valor, "Sin asignar")
+            previo, valor = nombres_usuarios(previo or [], usuarios), nombres_usuarios(valor, usuarios)
+        elif (previo or None) == (valor or None):
+            continue
+        else:
+            etiqueta = COLUMNAS_TABLA.get(campo, campo)
+        if campo == "suplidor_id":
+            etiqueta = "Suplidor"
+            previo, valor = nombres_sup.get(previo, "Sin suplidor"), nombres_sup.get(valor, "Sin suplidor")
         cambios.append(f"{etiqueta}: {recortar(previo)} → {recortar(valor)}")
     return "; ".join(cambios)
 
@@ -487,7 +518,8 @@ def pagina_formulario():
 
     editando = cid != 0
     actual = por_id.get(cid, {})
-    usuarios = usuarios_asignables(actual.get("asignado_a"))
+    usuarios = usuarios_asignables(actual.get("asignados") or [])
+    suplidores = [c for c in clientes if c["tipo"] == "Suplidor" and c["id"] != cid]
 
     st.divider()
 
@@ -531,6 +563,15 @@ def pagina_formulario():
             key="prod" + k,
         )
 
+        # Dentro del formulario el campo no puede aparecer y desaparecer según
+        # el tipo elegido; si el registro es un suplidor, se ignora al guardar.
+        suplidor_id = selector_suplidor(
+            "Suplidor (opcional, solo para clientes)",
+            suplidores,
+            actual.get("suplidor_id"),
+            key="sup" + k,
+        )
+
         col3, col4 = st.columns(2)
         # Registros con un estado que ya no existe (p. ej. el antiguo
         # "Prospecto") abren con el primero de la lista.
@@ -541,15 +582,15 @@ def pagina_formulario():
             index=db.ESTADOS.index(estado_actual) if estado_actual in db.ESTADOS else 0,
             key="estado" + k,
         )
-        # Solo el administrador asigna. Lo que registra un usuario queda a su
-        # nombre; al editar, la asignación no cambia.
+        # Solo el administrador asigna (uno o varios usuarios). Lo que registra
+        # un usuario queda a su nombre; al editar, la asignación no cambia.
         if es_admin():
             with col3:
-                asignado_a = selector_asignado(
-                    "Asignado a", usuarios, actual.get("asignado_a"), key="asig" + k
+                asignados = selector_asignados(
+                    "Asignado a", usuarios, actual.get("asignados") or [], key="asig" + k
                 )
         else:
-            asignado_a = actual.get("asignado_a") if editando else sesion["id"]
+            asignados = list(actual.get("asignados") or []) if editando else [sesion["id"]]
             col3.markdown(
                 f"**Asignado a:** {nombre_asignado(actual) if editando else '⭐ Tú'}"
             )
@@ -580,19 +621,23 @@ def pagina_formulario():
                 "productos_interes": productos.strip(),
                 "estado": estado,
                 "tipo": tipo,
-                "asignado_a": asignado_a,
+                "suplidor_id": suplidor_id if tipo == "Cliente" else None,
+                "asignados": asignados,
             }
 
             if editando:
                 db.actualizar_cliente(conn, cid, datos)
-                cambios = describir_cambios(actual, datos, usuarios)
+                cambios = describir_cambios(actual, datos, usuarios, suplidores)
                 if cambios:
                     anotar("Edición", f"{tipo} {etiqueta_registro(datos)}: {cambios}")
                 avisar(f"{tipo} **{datos['nombre']}** actualizado.")
             else:
                 nuevo_id = db.crear_cliente(conn, datos)
-                asignado = {u["id"]: u["nombre"] for u in usuarios}.get(asignado_a, "Sin asignar")
-                anotar("Registro", f"{tipo} {etiqueta_registro(datos)} · asignado a {asignado}")
+                detalle = f"{tipo} {etiqueta_registro(datos)} · asignado a {nombres_usuarios(asignados, usuarios)}"
+                if datos["suplidor_id"]:
+                    suplidor = next(s for s in suplidores if s["id"] == datos["suplidor_id"])
+                    detalle += f" · suplidor {etiqueta_registro(suplidor)}"
+                anotar("Registro", detalle)
                 # Vaciar el formulario de alta para que no reaparezca relleno.
                 st.session_state["alta_gen"] = st.session_state.get("alta_gen", 0) + 1
                 st.session_state["cliente_foco"] = nuevo_id
@@ -604,7 +649,10 @@ def pagina_formulario():
 
     st.divider()
     st.subheader(f"Eliminar {actual['tipo'].lower()}")
-    st.caption("Eliminar un registro borra también todo su historial de contactos.")
+    st.caption(
+        "Eliminar un registro borra también todo su historial de contactos."
+        + (" Sus clientes quedan sin suplidor." if actual["tipo"] == "Suplidor" else "")
+    )
     col5, col6 = st.columns([1, 2])
     confirmar = col6.checkbox("Confirmo que quiero eliminar este registro", key="conf_del" + k)
     if col5.button("🗑️ Eliminar", disabled=not confirmar):
@@ -616,20 +664,24 @@ def pagina_formulario():
 
 
 # --------------------------------------------------------------------------
-# 3. Lista de suplidores y clientes
+# 3. Listas de suplidores y de clientes
 # --------------------------------------------------------------------------
 
-FILTRO_TIPO = {"Ambos": "Ambos", "Clientes": "Cliente", "Suplidores": "Suplidor"}
+# El tipo ya lo dice la sección; cada lista lleva solo su columna de relación.
+COLUMNAS_CLIENTES = {c: t for c, t in COLUMNAS_TABLA.items() if c not in ("tipo", "total_clientes")}
+COLUMNAS_SUPLIDORES = {c: t for c, t in COLUMNAS_TABLA.items() if c not in ("tipo", "suplidor_nombre")}
 
 
-def pagina_lista():
-    st.title(LISTA)
-
+def pagina_lista(titulo, tipo, columnas, archivo, extra=None):
+    """Lista de clientes o de suplidores (según `tipo`) con filtros,
+    exportación y acciones rápidas. `extra(id, registro)` agrega acciones
+    propias de la sección sobre el registro elegido."""
+    st.title(titulo)
     mostrar_aviso()
+    plural = "clientes" if tipo == "Cliente" else "suplidores"
 
-    col1, col2, col3, col8 = st.columns([3, 2, 2, 2])
+    col1, col3, col8 = st.columns([3, 2, 2])
     busqueda = col1.text_input("🔍 Buscar", placeholder="Nombre, empresa, ubicación o productos…")
-    tipo = col2.selectbox("Mostrar", list(FILTRO_TIPO))
     estado = col3.selectbox("Filtrar por estado", ["Todos"] + db.ESTADOS)
     usuarios = usuarios_asignables()
     nombres = {u["id"]: u["nombre"] for u in usuarios}
@@ -640,43 +692,48 @@ def pagina_lista():
                                db.SIN_ASIGNAR: "Sin asignar"}.get(i) or nombres[i],
     )
 
-    total = db.contar_clientes(conn)
+    total = db.contar_clientes(conn, tipo)
     if total == 0:
-        st.info(f"Todavía no hay suplidores ni clientes registrados. Empieza en **{FORMULARIO}**.")
+        st.info(f"Todavía no hay {plural} registrados. Empieza en **{FORMULARIO}**.")
         return
 
-    clientes = db.listar_clientes(conn, busqueda, estado, FILTRO_TIPO[tipo], asignado)
-    for c in clientes:
+    registros = db.listar_clientes(conn, busqueda, estado, tipo, asignado)
+    for c in registros:
         c["asignado_nombre"] = nombre_asignado(c)
-    st.caption(f"Mostrando **{len(clientes)}** de **{total}** registros. ⭐ = asignado a ti.")
+    st.caption(f"Mostrando **{len(registros)}** de **{total}** {plural}. ⭐ = asignado a ti.")
 
-    df = tabla_clientes(clientes)
+    df = tabla_clientes(registros, columnas)
     if df.empty:
         st.warning("Ningún registro coincide con la búsqueda.")
     else:
         st.dataframe(df, width="stretch", hide_index=True)
 
+    # En el archivo completo van los nombres tal cual, sin la ⭐ de quien exporta.
+    todos = db.listar_clientes(conn, tipo=tipo)
+    for c in todos:
+        c["asignado_nombre"] = ", ".join(c["asignados_nombres"]) or "Sin asignar"
+
     col4, col5 = st.columns(2)
     col4.download_button(
         "⬇️ Exportar resultados a CSV",
         data=a_csv(df),
-        file_name=f"suplidores_clientes_{date.today().isoformat()}.csv",
+        file_name=f"{archivo}_{date.today().isoformat()}.csv",
         mime="text/csv",
         disabled=df.empty,
     )
     col5.download_button(
         "⬇️ Exportar TODOS a CSV",
-        data=a_csv(tabla_clientes(db.listar_clientes(conn))),
-        file_name=f"suplidores_clientes_completo_{date.today().isoformat()}.csv",
+        data=a_csv(tabla_clientes(todos, columnas)),
+        file_name=f"{archivo}_completo_{date.today().isoformat()}.csv",
         mime="text/csv",
     )
 
-    if not clientes:
+    if not registros:
         return
 
     st.divider()
     st.subheader("Acciones rápidas")
-    cid = selector_cliente("Suplidor o cliente", clientes)
+    cid = selector_cliente(tipo, registros)
     col6, col7, col9 = st.columns(3)
     if col6.button("✏️ Editar este registro"):
         ir_a(FORMULARIO, cid)
@@ -685,33 +742,110 @@ def pagina_lista():
     if col9.button("🧾 Generar factura"):
         ir_a(FACTURAS, cid)
 
+    if extra:
+        extra(cid, next(c for c in registros if c["id"] == cid))
+
     if es_admin():
-        seccion_asignar(clientes, usuarios)
+        seccion_asignar(registros, usuarios)
 
 
-def seccion_asignar(clientes, usuarios):
-    """Asignación en bloque (solo administradores) sobre la lista filtrada."""
+def pagina_lista_clientes():
+    pagina_lista(LISTA_CLIENTES, "Cliente", COLUMNAS_CLIENTES, "clientes")
+
+
+def pagina_lista_suplidores():
+    pagina_lista(
+        LISTA_SUPLIDORES, "Suplidor", COLUMNAS_SUPLIDORES, "suplidores",
+        extra=seccion_clientes_del_suplidor,
+    )
+
+
+def seccion_clientes_del_suplidor(sid, suplidor):
+    """Elegir qué clientes atiende el suplidor. Un cliente tiene un solo
+    suplidor: si se elige uno que ya tenía otro, pasa a este."""
     st.divider()
-    st.subheader("👤 Asignar a un usuario")
-    st.caption("Usa los filtros de arriba para acotar la lista y asigna varios registros a la vez.")
+    st.subheader(f"🔗 Clientes de {suplidor['nombre']}")
+
+    clientes = db.listar_clientes(conn, tipo="Cliente")
+    if not clientes:
+        st.info(f"Todavía no hay clientes registrados. Empieza en **{FORMULARIO}**.")
+        return
 
     por_id = {c["id"]: c for c in clientes}
-    todos = st.checkbox(f"Todos los que se muestran arriba ({len(clientes)})")
+    actuales = [c["id"] for c in clientes if c["suplidor_id"] == sid]
+
+    def etiqueta(i):
+        c = por_id[i]
+        otro = c["suplidor_id"] not in (None, sid)
+        return etiqueta_cliente(c) + (f"  (ahora con {c['suplidor_nombre']})" if otro else "")
+
+    with st.form(f"form_clientes_suplidor_{sid}"):
+        elegidos = st.multiselect(
+            "Clientes asignados a este suplidor",
+            list(por_id),
+            default=actuales,
+            format_func=etiqueta,
+            placeholder="Ningún cliente",
+        )
+        st.caption("Si eliges un cliente que ya tiene otro suplidor, pasa a este.")
+        guardar = st.form_submit_button("💾 Guardar clientes", type="primary")
+
+    if not guardar:
+        return
+    agregados = [i for i in elegidos if i not in actuales]
+    quitados = [i for i in actuales if i not in elegidos]
+    if not agregados and not quitados:
+        st.info("No hubo cambios.")
+        return
+
+    db.vincular_clientes(conn, sid, elegidos)
+    partes = []
+    if agregados:
+        partes.append("agregados: " + ", ".join(etiqueta_registro(por_id[i]) for i in agregados))
+    if quitados:
+        partes.append("quitados: " + ", ".join(etiqueta_registro(por_id[i]) for i in quitados))
+    anotar("Clientes de suplidor", f"Suplidor {etiqueta_registro(suplidor)} · " + "; ".join(partes))
+    avisar(f"Clientes de **{suplidor['nombre']}** actualizados ({len(elegidos)} en total).")
+    st.rerun()
+
+
+MODOS_ASIGNACION = {
+    db.AGREGAR: "Agregar a los que ya tiene",
+    db.QUITAR: "Quitar de los que tiene",
+    db.REEMPLAZAR: "Reemplazar (dejar solo estos)",
+}
+
+
+def seccion_asignar(registros, usuarios):
+    """Asignación en bloque (solo administradores) sobre la lista filtrada."""
+    st.divider()
+    st.subheader("👤 Asignar usuarios")
+    st.caption(
+        "Usa los filtros de arriba para acotar la lista y cambia la asignación de varios "
+        "registros a la vez. Cada registro puede tener varios usuarios."
+    )
+
+    por_id = {c["id"]: c for c in registros}
+    todos = st.checkbox(f"Todos los que se muestran arriba ({len(registros)})")
     elegidos = list(por_id) if todos else st.multiselect(
         "Registros",
         list(por_id),
         format_func=lambda i: etiqueta_cliente(por_id[i]),
         placeholder="Elige uno o varios",
     )
+    destino = selector_asignados("Usuarios", usuarios)
     col1, col2 = st.columns([2, 1], vertical_alignment="bottom")
-    with col1:
-        destino = selector_asignado("Asignar a", usuarios)
-    if col2.button("✅ Asignar", disabled=not elegidos):
-        db.asignar_clientes(conn, elegidos, destino)
-        a_quien = {u["id"]: u["nombre"] for u in usuarios}.get(destino, "Sin asignar")
+    modo = col1.radio(
+        "Cómo", list(MODOS_ASIGNACION), format_func=MODOS_ASIGNACION.get, horizontal=True
+    )
+    # Reemplazar sin usuarios deja los registros sin asignar; agregar o quitar
+    # sin usuarios no haría nada.
+    if col2.button("✅ Aplicar", disabled=not elegidos or (not destino and modo != db.REEMPLAZAR)):
+        db.asignar_clientes(conn, elegidos, destino, modo)
+        a_quien = nombres_usuarios(destino, usuarios)
         nombres = ", ".join(etiqueta_registro(por_id[i]) for i in elegidos)
-        anotar("Asignación", f"{len(elegidos)} registro(s) → {a_quien}: {nombres}")
-        avisar(f"**{len(elegidos)}** registro(s) asignado(s) a **{a_quien}**.")
+        anotar("Asignación", f"{len(elegidos)} registro(s) · {modo}: {a_quien} · {nombres}")
+        avisar(f"Asignación de **{len(elegidos)}** registro(s) actualizada ({modo.lower()}: **{a_quien}**).")
         st.rerun()
 
 
@@ -1367,7 +1501,7 @@ def pagina_usuarios():
     confirmar = col6.checkbox("Confirmo que quiero eliminar este usuario", key="ue_del" + k)
     if col5.button("🗑️ Eliminar usuario", disabled=not confirmar):
         db.eliminar_usuario(conn, uid)
-        anotar("Usuario eliminado", f"{u['nombre']} ({u['usuario']}) · sus registros quedan sin asignar")
+        anotar("Usuario eliminado", f"{u['nombre']} ({u['usuario']}) · se quita de los registros que tenía asignados")
         avisar(f"Usuario **{u['usuario']}** eliminado.", "warning")
         st.rerun()
 
@@ -1476,7 +1610,8 @@ with st.sidebar:
 VISTAS = {
     DASHBOARD: pagina_dashboard,
     FORMULARIO: pagina_formulario,
-    LISTA: pagina_lista,
+    LISTA_SUPLIDORES: pagina_lista_suplidores,
+    LISTA_CLIENTES: pagina_lista_clientes,
     CONTACTOS: pagina_contactos,
     SEGUIMIENTO: pagina_seguimiento,
     FACTURAS: pagina_facturas,
